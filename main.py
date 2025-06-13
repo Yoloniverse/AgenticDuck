@@ -51,8 +51,8 @@ def get_current_weather(city: str) -> dict:
 https://python.langchain.com/docs/integrations/tools/tavily_search/
 """
 ## 타빌리 서치엔진 초기화
-search_tool = TavilySearch(max_results=2)
-# result = search_tool.invoke("2025 June 9th, there was a final round of nations league for footbal. Who won?")
+# search_tool = TavilySearch(max_results=2)
+# result = search_tool.invoke("2025 June 9th, there was a final round of nations league for football. Who won?")
 # result = search_tool.invoke("대한민국 선릉역 근처에서 가장 가봐야 할 맛집은 어디야??")
 # result['results'][0]['content']
 
@@ -60,6 +60,7 @@ search_tool = TavilySearch(max_results=2)
 @tool
 def taviliy_web_search_tool(query: str) -> str:
     """Search the web using Tavily."""
+    
     search_tool = TavilySearch(max_results=1)
     result = search_tool.invoke(query)
     logger.info(f"result: {result}")
@@ -77,6 +78,10 @@ def validate_user(user_id: int, addresses: List[str]) -> bool:
     return True
 
 
+
+
+
+
 ## 위 세 툴들을 리스트로 묶기
 tools = [get_current_weather, taviliy_web_search_tool, validate_user]
 
@@ -88,7 +93,7 @@ llm = ChatOllama(model="llama3.1", temperature=0.1)
 llm_with_tools = llm.bind_tools(tools)
 
 ## LLM에 툴 바인딩한 후, invoke 메소드로 툴 호출하여 툴 사용 테스트 하기 
-# result = llm_with_tools.invoke("2025 June 9th, there was a final round of nations league for footbal. Who won?")
+result = llm_with_tools.invoke("2025 June 9th, there was a final round of nations league for football. Who won?")
 # result = llm_with_tools.invoke("선릉역 근처에 있는 SDT라는 회사에서 가장 가까운 맛집을 알려줘")
 
 ## 툴을 사용했는지 확인
@@ -111,7 +116,7 @@ agent = create_tool_calling_agent(llm, tools, prompt)
 agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True) ## verbose=True로 설정하면 실행 과정확인 가능
 
 ## AgentExecutor 실행
-response_from_agent = agent_executor.invoke({"input": "2025 June 9th, there was a final round of nations league for footbal. Who won?"})
+response_from_agent = agent_executor.invoke({"input": "2025 June 9th, there was a final round of nations league for football. Who won?"})
 response_from_agent = agent_executor.invoke({"input": "What happened to Donald Trump at 10th of June in 2025?"})
 response_from_agent = agent_executor.invoke({"input": "What is the best restaurant near Gangnam station?"})
 response_from_agent = agent_executor.invoke({"input": "강남에 있는 선릉역 근처에 SDT라는 회사에 대해 말해줘"})
