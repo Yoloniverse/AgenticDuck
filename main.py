@@ -10,6 +10,10 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain.agents.format_scratchpad.openai_tools import format_to_openai_tool_messages
 from langchain_tavily import TavilySearch
 from langchain_ollama import ChatOllama
+from langchain_anthropic import ChatAnthropic
+
+from pydantic import BaseModel, Field
+import getpass
 from typing import List
 import logging.handlers
 
@@ -31,6 +35,14 @@ log_fileHandler = logging.handlers.RotatingFileHandler(
 log_fileHandler.setFormatter(formatter)
 logger.addHandler(log_fileHandler)
 
+
+
+
+
+# def _set_env(var: str):
+#     if not os.environ.get(var):
+#         os.environ[var] = getpass.getpass(f"{var}: ")
+# _set_env("ANTHROPIC_API_KEY")
 
 
 ## 더미 날씨 툴 함수 만들기
