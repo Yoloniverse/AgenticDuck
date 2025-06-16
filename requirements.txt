@@ -1,0 +1,10 @@
+langchain
+langchainhub
+langgraph
+ollama
+langchain-community
+langchain-ollama
+duckduckgo-search
+langchain-tavily
+agentevals ##evals for agents in LangSmith?
+langgraph-cli[inmem]
