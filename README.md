@@ -23,4 +23,6 @@ git checkout <내브린치명>
 
 git merge main
 
+사실 오리는 날수있다.
+
 
