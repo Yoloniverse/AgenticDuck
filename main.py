@@ -29,6 +29,7 @@ from toolings import get_current_weather, validate_user, taviliy_web_search_tool
 
 ## other libraries
 from pydantic import BaseModel, Field
+from typing import Any, TypedDict, Annotated
 import getpass
 from typing import List
 import logging.handlers
@@ -86,7 +87,7 @@ tools = [get_current_weather, taviliy_web_search_tool, validate_user]
 
 
 ## Ollama LLM 객체 만들기
-llm = ChatOllama(model="llama3.1", temperature=0.1)
+llm = ChatOllama(model="llama3.1", temperature=0.1) ## qwen3:8b 다운받아놓음. 한국어 실력이 더 좋다고 함.
 ## LLM에 툴 바인딩하기
 llm_with_tools = llm.bind_tools(tools)
 
@@ -139,6 +140,29 @@ def call_model(state: MessagesState):
     response = llm.invoke(state["messages"])
     return {"messages": response}
 
+class CustomStateTypedDict(TypedDict):  
+    messages: list[str]
+    user_class: dict[str, Any]
+    user_email: str
+
+
+test_dict: CustomStateTypedDict = {"messages" : ["hi?"],
+                                    "user_age" : {"animal": "duck"},
+                                    "user_email" : "lunchduck@sdt.inc"}
+
+test_dict.get("messages")                
+test_dict["user_age"]
+
+class CustomStatePyDantic(BaseModel):  
+    messages: list[str]
+    user_class: dict[str, Any]
+    user_email: str
+
+test_dantic = CustomStatePyDantic(messages = ['hi?'],
+                                  user_class = {"what!?" : "Was!?"},
+                                  user_email = "DonaldTrump@tesla.com")
+
+test_dantic.user_class
 
 ## 우리의 랭그래프 빌딩
 builder = StateGraph(MessagesState)
