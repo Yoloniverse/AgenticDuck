@@ -1,7 +1,7 @@
 
 from langchain.agents import tool
 from langchain_tavily import TavilySearch
-
+from typing import List
 import logging.handlers
 import os
 ## 호준 Tavily API Key
