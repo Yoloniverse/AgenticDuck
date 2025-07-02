@@ -41,7 +41,7 @@ import logging.handlers
 import requests
 import asyncio
 import json
-
+from pprint import pprint
 
 ## custom made libraries
 from toolings import get_current_weather, validate_user, taviliy_web_search_tool
@@ -113,37 +113,41 @@ store = InMemoryStore()
 
 
 ## mcp tool들 명세서 json형식으로 load
-with open("/home/sdt/Workspace/mvai/AgenticRAG/mcp_config.json", "r") as f:
-    mcp_json_config = json.load(f)
+with open("/home/sdt/Workspace/mvai/AgenticRAG/mcp_config_websearch.json", "r") as f:
+    mcp_config_websearch = json.load(f)
 
-from pprint import pprint
-pprint(mcp_json_config)
+
+pprint(mcp_config_websearch)
 ## LangGraph에서 사용할 수 있는 형식으로 mcp tool json 전처리
-mcp_json_config = create_server_config(mcp_json_config)
-pprint(mcp_json_config)
+mcp_config_websearch = create_server_config(mcp_config_websearch)
+pprint(mcp_config_websearch)
 
 ## mcp server들을 LangChain의 mcp client adapter로 연결
-client = MultiServerMCPClient(mcp_json_config)
+websearch_client = MultiServerMCPClient(mcp_config_websearch)
 ## 연결된 툴들 조회 
-tools = await client.get_tools()
-pprint(tools)
+websearch_tools = await websearch_client.get_tools()
+pprint(websearch_tools)
 
 
 ###############
 ## LangGraph 에이전트 구축
 
-## 1. LangGraph의 pre-built ReAct agent 생성 (가장 기초적)
-agent = create_react_agent(
-    llm,
-    tools,
+## 1. LangGraph의 pre-built ReAct agent 생성 (가장 기초적), 3개의 agent 따로 만들기 
+
+websearch_agent = create_react_agent(
+    model=llm,
+    tools=websearch_tools,
+    prompt=(
+        "You are a websearch agent.\n\n"
+        "INSTRUCTIONS:\n"
+        "- Assist ONLY with math-related tasks\n"
+        "- After you're done with your tasks, respond to the supervisor directly\n"
+        "- Respond ONLY with the results of your work, do NOT include ANY other text."
+    ),
+    name="websearch_agent",
 )
-    # checkpointer=checkpointer)
 
-## 
-await agent.ainvoke({"messages": "what's (3 + 5) x 12?"})
 
-await agent.stream({"messages": [{"role": "user", "content": "who is the mayor of NYC?"}]})
-await agent.astream({"messages": [{"role": "user", "content": "who is the mayor of NYC?"}]})
 
 
 SQL_agent = create_react_agent(
@@ -160,19 +164,6 @@ SQL_agent = create_react_agent(
 )
 
 
-
-websearch_agent = create_react_agent(
-    model="openai:gpt-4.1",
-    tools=[add, multiply, divide],
-    prompt=(
-        "You are a math agent.\n\n"
-        "INSTRUCTIONS:\n"
-        "- Assist ONLY with math-related tasks\n"
-        "- After you're done with your tasks, respond to the supervisor directly\n"
-        "- Respond ONLY with the results of your work, do NOT include ANY other text."
-    ),
-    name="math_agent",
-)
 
 
 doc_retriever_agent = create_react_agent(
