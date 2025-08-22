@@ -9,7 +9,7 @@ from langchain_tavily import TavilySearch
 from langchain_ollama import ChatOllama
 #from langmem.short_term import SummarizationNode
 from langchain_core.messages.utils import count_tokens_approximately
-
+from langgraph.prebuilt import create_react_agent
 # from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
 
@@ -81,7 +81,7 @@ llm = ChatOllama(model="qwen3:8b", temperature=0.1) ## qwen3:8b 다운받아놓�
 
 ## LLM에 툴 바인딩한 후, invoke 메소드로 툴 호출하여 툴 사용 테스트 하기 
 #result = llm_with_tools.invoke("2025 June 9th, there was a final round of nations league for football. Who won?")
-#result = llm_with_tools.invoke("선릉역 근처에 있는 SDT라는 회사에서 가장 가까운 맛집을 알려줘")
+#result = llm_with_tools.invoke("선릉역 근처에 있는 SDT라는 회사에서 가장 가까운 맛집을 알려줘. 꼭 한글로 대답해라")
 #print(result)
 ## 툴을 사용했는지 확인
 #result.tool_calls
@@ -92,11 +92,13 @@ tools = [get_current_weather, taviliy_web_search_tool, validate_user, get_menual
 ## 프롬프트 정의 (툴 호출 에이전트에 적합한 형식)
 prompt = ChatPromptTemplate.from_messages(
     [
-        ("system", "You are a helpful assistant"),
+        ("system", "너는 사용자 질문에 한국어로 대답해주는 어시스턴트야."),
         ("human", "{input}"),
         ("placeholder", "{agent_scratchpad}"),
     ]
 )
+
+
 ## 툴 호출 에이전트 생성
 agent = create_tool_calling_agent(llm, tools, prompt)
 
@@ -113,13 +115,11 @@ agent = create_tool_calling_agent(llm, tools, prompt)
 # route_llm = llm.with_structured_output(RouteDecision)
 
 
-
-
 ## AgentExecutor 생성 - 단일 agnet에 사용하는 편
 agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True) ## verbose=True로 설정하면 실행 과정확인 가능
 ## AgentExecutor 실행 - 단일 agnet에 사용하는 편
-response_from_agent = agent_executor.invoke({"input": "What's the weather like in Seoul, Korea today?"})
-#print(response_from_agent['output'])
+response_from_agent = agent_executor.invoke({"input": "선릉역 3번출구 근처에있는 맛집 2개만 추천해줘"})
+print(response_from_agent['output'].split('</think>\n\n')[-1])
 
 
 

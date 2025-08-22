@@ -1,19 +1,10 @@
-'''
-진행사항: thread에서 대화내용을 저장하면서 대화하도록 하였으며, 이전 대화 기록을 필요한 소스만 담도록 함(요약도 필요할듯)
-할 일: 
- 1. lunchduck 업데이트 갈기기
- 2. multi agent 구성을 위해, hallucination 검증하는 agent를 추가.
- 3. 사내 규정 RAG tool에 사용할 모듈(db 연결하고 검색해서 결과 반환하는 기능) 만들기(사내 규정 데이터 가공이 필요함)
- 4. RAG 툴만들면 문서 종류별로 collection 찾아서 검색 기능 사용하는 함수 만들기
-'''
-
 
 import os
 ## Langchain libraries
 from langchain.llms import Ollama
 from langchain.agents import tool, AgentExecutor, create_tool_calling_agent
 from langchain_tavily import TavilySearch
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.prompts import ChatPromptTemplate
 from langchain.agents.format_scratchpad.openai_tools import format_to_openai_tool_messages
 from langchain_tavily import TavilySearch
 from langchain_ollama import ChatOllama
@@ -22,32 +13,21 @@ from langchain_core.messages.utils import count_tokens_approximately
 from langgraph.prebuilt import create_react_agent
 
 # from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage, AIMessage
+from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
 
 ## LangGraph libraries
 from langgraph.checkpoint.memory import InMemorySaver, MemorySaver
 from langgraph.store.memory import InMemoryStore
 from langgraph.graph import MessagesState, START, END, StateGraph
-from langgraph.graph.message import add_messages
+
 ## custom made libraries
-from toolings import taviliy_web_search_tool, get_menual_info, get_db_info
+from toolings_hr import get_comp_info, get_hr_process, get_staff_info, get_doc_apprl_info
 ## other libraries
 from pydantic import BaseModel, Field
 from typing import Any, TypedDict, Annotated, Literal, List, Dict
 import getpass
 from typing import List
 import logging.handlers
-
-
-### 멀티에이전트 
-"""
-1. Subgrapgh를 사용.
-2. 각 Subgraph를 독립적으로 memory cache에 저장.
-3. 다양한 유저의 요청을 처리하기 위해 asynce로 함수 호출
-
-subgraph_builder = StateGraph(...)
-subgraph = subgraph_builder.compile(checkpointer=True)
-"""
 
 
 ######################################################################
@@ -60,7 +40,7 @@ formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(messag
 log_max_size = 1024000
 log_file_count = 3
 log_fileHandler = logging.handlers.RotatingFileHandler(
-        filename=f"./logs/agent.log",
+        filename=f"./logs/HR_agent.log",
         maxBytes=log_max_size,
         backupCount=log_file_count,
         mode='a')
@@ -76,6 +56,9 @@ store = InMemoryStore()
 
 ## Ollama LLM 객체 만들기
 # ollama pul qwen3:8b 
+# 4bit 모델: "qwen3:8b-q4_K_M"
+# 8bit 모델: "qwen3:8b-q8_0"
+# 16bit 모델 : "qwen3:8b-fp16"
 llm = ChatOllama(model="qwen3:8b", temperature=0.1) ## qwen3:8b 다운받아놓음. 한국어 실력이 더 좋다고 함.
 ## LLM에 툴 바인딩하기 test
 #llm_with_tools = llm.bind_tools(tools)
@@ -86,120 +69,70 @@ llm = ChatOllama(model="qwen3:8b", temperature=0.1) ## qwen3:8b 다운받아놓�
 ## 툴을 사용했는지 확인
 #result.tool_calls
 
-
-# Search Agent Gen
-
-tools = [taviliy_web_search_tool, get_menual_info, get_db_info]
+tools = [get_comp_info, get_hr_process, get_staff_info, get_doc_apprl_info]
 
 ## 프롬프트 정의 (툴 호출 에이전트에 적합한 형식)
 prompt = ChatPromptTemplate.from_messages(
     [
-        ("system", "너는 사용자 질문에 한국어로 대답해주는 어시스턴트야."),
+        ("system", "너는 사내 규정에 대한 직원의 질문에 대답해주는 QnA 어시스턴트야."),
         ("human", "{user_question}"),
-        MessagesPlaceholder("messages"),
         ("placeholder", "{agent_scratchpad}"),
     ]
 )
 
-prompt_ch = ChatPromptTemplate.from_messages(
-    [
-        ("system", "너는 AI가 답변한 내용이 사용자의 질문에 맞는지 검증하고 맞지 않는 답변을 걸러서 최종 답변을 생성하는 역할이야. 어떤식으로 검증했는지는 다 생략하고 사용자에게 제공할 최종 답변만 간결하게 해줘."),
-        ("human", "사용자 질문: {user_question}\n\nAI 답변: {ai_answer}"),
-    ]
-)
+
 ## 툴 호출 에이전트 생성
 agent = create_tool_calling_agent(llm, tools, prompt)
-agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=False) 
+agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True) 
 # 검증 체인
 reviewer_chain = prompt_ch | llm
-class State(TypedDict):
-    messages: Annotated[list, add_messages]
 
 class AppState(TypedDict, total=False):
     # 대화(필요하면 계속 누적)
-    # messages: List[Dict[str, Any]]
-    messages: Annotated[list, add_messages]
+    messages: List[Dict[str, Any]]
     # Executor가 생성한 초안
-    #draft_answer: str
+    draft_answer: str
     # Reviewer가 후처리한 최종 답
     final_answer: str
 
 
 def executor_node(state: AppState) -> AppState:
     # 마지막 사용자 메시지에서 질문 꺼내기 (or 별도 필드 사용)
-    user_q = state["messages"][-1].content
-    out = agent_executor.invoke({"user_question": user_q, "messages": state["messages"], })
-    #print("out : ", out['user_question'] + out['output'].split('</think>\n\n')[-1])
-    draft = out['output'].split('</think>\n\n')[-1]
-    #draft = out.content["output"].split('</think>\n\n')[-1] if hasattr(out, "content") else str(out)
-    #draft = getattr(out, "content", str(out))
-
-    # ({
-    #     "messages": state["messages"] + [{"role": "assistant", "content": draft}],
-    #     "draft_answer": draft
-    # })
-    print('stats의 messages: ',state['messages'])
+    user_q = state["messages"][-1]["content"]
+    out = agent_executor.invoke({"user_question": user_q})
+    draft = out.content if hasattr(out, "content") else str(out)
     return {
-        "messages": [str(draft)],
-        "final_answer": str(draft)
+        "messages": state["messages"] + [{"role": "assistant", "content": draft}],
+        "draft_answer": draft
     }
 
-
-# def reviewer_node(state: AppState) -> AppState:
-#     user_q = state["messages"][-1].content  # 간단히 마지막을 질문으로 사용
-#     ai_ans = state.get("draft_answer", "")
-#     out = reviewer_chain.invoke({"user_question": user_q, "ai_answer": ai_ans})
-#     #final = out.content if hasattr(out, "content") else str(out)
-#     final = getattr(out, "content", str(out))
-#     # return {
-#     #     "messages": state["messages"] + [{"role": "assistant", "content": final}],
-#     #     "final_answer": final
-#     # }
-#     return {
-#         "messages": [{"role": "assistant", "content": final}],
-#         "final_answer": final,
-#     }
+def reviewer_node(state: AppState) -> AppState:
+    user_q = state["messages"][-1]["content"]  # 간단히 마지막을 질문으로 사용
+    ai_ans = state.get("draft_answer", "")
+    out = reviewer_chain.invoke({"user_question": user_q, "ai_answer": ai_ans})
+    final = out.content if hasattr(out, "content") else str(out)
+    return {
+        "messages": state["messages"] + [{"role": "assistant", "content": final}],
+        "final_answer": final
+    }
 
 builder = StateGraph(AppState)
 builder.add_node("executor", executor_node)
-# builder.add_node("reviewer", reviewer_node)
+builder.add_node("reviewer", reviewer_node)
 
 builder.add_edge(START, "executor")
-# builder.add_edge("executor", "reviewer")
-# builder.add_edge("reviewer", END)
-builder.add_edge("executor", END)
+builder.add_edge("executor", "reviewer")
+builder.add_edge("reviewer", END)
 
-#checkpointer = MemorySaver()
-graph = builder.compile(checkpointer=checkpointer, store=store)
+checkpointer = MemorySaver()
+graph = builder.compile(checkpointer=checkpointer)
 
 # 실행 예시
 out = graph.invoke(
     {"messages": [{"role":"user","content":"선릉역 근처에 있는 SDT라는 회사에서 가장 가까운 맛집을 알려줘"}]},
     {"configurable": {"thread_id": "t1"}}
 )
-print(out["final_answer"])
-
-
-
-out = graph.invoke(
-    {"messages": [{"role":"user","content":"너가 알려줬던 2번 맛집의 상세 주소가 어디니"}]},
-    {"configurable": {"thread_id": "t1"}}
-)
-print(out["final_answer"])
-
-out = graph.invoke(
-    {"messages": [{"role":"user","content":"그럼 그 맛집에서 추천 메뉴 하나만 알려줄래?"}]},
-    {"configurable": {"thread_id": "t1"}}
-)
-print(out["final_answer"])
-
-
-
-
-
-
-
-
+print(out["final_answer"].split('</think>\n\n')[-1])
 
 
 #--------------------------------------------------------------

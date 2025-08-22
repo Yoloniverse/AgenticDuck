@@ -38,11 +38,11 @@ https://python.langchain.com/docs/integrations/tools/tavily_search/
 def taviliy_web_search_tool(query: str) -> str:
     """Search the web using Tavily."""
     
-    search_tool = TavilySearch(max_results=1)
+    search_tool = TavilySearch(max_results=3)
     result = search_tool.invoke(query)
     logger.info(f"result: {result}")
-    answer = result['results'][0]['content']
-    return answer
+    #answer = result['results'][0]['content']
+    return result
 
 ## 더미 유저 검증 툴 함수 만들기
 @tool
