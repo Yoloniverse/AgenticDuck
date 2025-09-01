@@ -4,7 +4,7 @@ import os
 from langchain.llms import Ollama
 from langchain.agents import tool, AgentExecutor, create_tool_calling_agent
 from langchain_tavily import TavilySearch
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.agents.format_scratchpad.openai_tools import format_to_openai_tool_messages
 from langchain_tavily import TavilySearch
 from langchain_ollama import ChatOllama
@@ -13,22 +13,26 @@ from langchain_core.messages.utils import count_tokens_approximately
 from langgraph.prebuilt import create_react_agent
 
 # from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
+from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage, AIMessage, AnyMessage
 
 ## LangGraph libraries
 from langgraph.checkpoint.memory import InMemorySaver, MemorySaver
 from langgraph.store.memory import InMemoryStore
 from langgraph.graph import MessagesState, START, END, StateGraph
+from langgraph.graph.message import add_messages
+from langgraph.types import Command
 
 ## custom made libraries
-from toolings_hr import get_comp_info, get_hr_process, get_staff_info, get_doc_apprl_info
+#from toolings_hr import get_staff_info, get_doc_apprl_info
 ## other libraries
 from pydantic import BaseModel, Field
-from typing import Any, TypedDict, Annotated, Literal, List, Dict
+from typing import Any, TypedDict, Annotated, Literal, List, Dict, Optional
 import getpass
 from typing import List
 import logging.handlers
 
+#sql node
+from sqlalchemy import create_engine, text, inspect
 
 ######################################################################
 #                             Save Log                               #
@@ -47,10 +51,20 @@ log_fileHandler = logging.handlers.RotatingFileHandler(
 
 log_fileHandler.setFormatter(formatter)
 logger.addHandler(log_fileHandler)
+## db 연결
+db_user = "admin"
+db_password = "sdt251327"
+db_host = "127.0.0.1"
+db_name = "langgraph" 
 
+# Const`ruct the connection string
+connection_string = f"mysql+pymysql://{db_user}:{db_password}@{db_host}/{db_name}"
+engine = create_engine(connection_string)
+connection = engine.connect()
+inspector = inspect(engine)
 
 ## Thread (세션)의 대화내용을 저장하기 위한 체크포인터 . 에이전트에 checkpointer를 전달하면서 여러 호출 간 상태 유지(short-term memory)
-checkpointer = InMemorySaver()
+#checkpointer = InMemorySaver()
 ## long-term memory를 위한 스토어. 모든 스레드에서 재활용할 수 있는 지식이 필요할 때 씀. 서비스가 running중일 때만 유지됨. 영구 저장은 DB를 사용해야 함.
 store = InMemoryStore()
 
@@ -60,168 +74,170 @@ store = InMemoryStore()
 # 8bit 모델: "qwen3:8b-q8_0"
 # 16bit 모델 : "qwen3:8b-fp16"
 llm = ChatOllama(model="qwen3:8b", temperature=0.1) ## qwen3:8b 다운받아놓음. 한국어 실력이 더 좋다고 함.
-## LLM에 툴 바인딩하기 test
-#llm_with_tools = llm.bind_tools(tools)
-## LLM에 툴 바인딩한 후, invoke 메소드로 툴 호출하여 툴 사용 테스트 하기 
-#result = llm_with_tools.invoke("2025 June 9th, there was a final round of nations league for football. Who won?")
-#result = llm_with_tools.invoke("선릉역 근처에 있는 SDT라는 회사에서 가장 가까운 맛집을 알려줘")
-#print(result)
-## 툴을 사용했는지 확인
-#result.tool_calls
 
-tools = [get_comp_info, get_hr_process, get_staff_info, get_doc_apprl_info]
 
-## 프롬프트 정의 (툴 호출 에이전트에 적합한 형식)
-prompt = ChatPromptTemplate.from_messages(
+prompt_router = ChatPromptTemplate.from_messages(
     [
-        ("system", "너는 사내 규정에 대한 직원의 질문에 대답해주는 QnA 어시스턴트야."),
+        ("system", "너는 사용자 질문을 읽고 사내 결재 기안 규정에 대한 질문인지, 사내 직원 정보에 대한 질문인지 판단하는 역할이야."),
         ("human", "{user_question}"),
-        ("placeholder", "{agent_scratchpad}"),
+        MessagesPlaceholder("messages")
     ]
 )
 
 
-## 툴 호출 에이전트 생성
-agent = create_tool_calling_agent(llm, tools, prompt)
-agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True) 
-# 검증 체인
-reviewer_chain = prompt_ch | llm
-
 class AppState(TypedDict, total=False):
     # 대화(필요하면 계속 누적)
-    messages: List[Dict[str, Any]]
+    messages: Annotated[list[dict], add_messages]
+    # router_node의 분기 결과
+    path_results: str
     # Executor가 생성한 초안
-    draft_answer: str
-    # Reviewer가 후처리한 최종 답
-    final_answer: str
+    RAG_result: str
+    error_RAG: str
+    SQL_draft: str
+    SQL_result: str
+    error_SQL: Optional[str]    
+    hallucination_check: bool # source를 사용한 답변 생성 후 hallucination 검토 
+    # 검토 후 통과한 최종 답변
+    final_answer: str 
+
+# 출력 스키마 사용
+class OutputState(TypedDict):
+    # 검토 후 통과한 최종 답변
+    final_answer: str                      # 외부로 반환하는 데이터
+
+class RouteOut(BaseModel):
+    route: Literal["policy", "employee", "unclear"]  # 결재규정 / 직원정보 / 불명확
+    confidence: float = Field(ge=0, le=1)
 
 
-def executor_node(state: AppState) -> AppState:
-    # 마지막 사용자 메시지에서 질문 꺼내기 (or 별도 필드 사용)
-    user_q = state["messages"][-1]["content"]
-    out = agent_executor.invoke({"user_question": user_q})
-    draft = out.content if hasattr(out, "content") else str(out)
+# 라우터 체인
+# 온도 0으로 결정성 높이기
+router_chain = prompt_router | llm.with_config({'temperature': 0}).with_structured_output(RouteOut)
+
+def router_node(state: AppState) -> Command[Literal["rag_node", "sql_gen_node", "general"]]:
+    '''
+    사용자 질문을 보고 다음 스텝 분기를 정하는 노드
+    '''
+    output = router_chain.invoke({"user_question": state['messages'], "messages": state["messages"]})
+    # 분기
+    path = output.route if output.confidence >= 0.6 else "unclear"
+    if path == "policy":
+        return Command(
+            goto="rag_node",
+            update={
+                "path_results": path,
+            }
+        )
+    elif path == "employee":
+        return Command(
+            goto="sql_gen_node",
+            update={
+                "path_results": path,
+            }
+        )
+    elif path == "unclear":
+        return Command(
+            goto="general",
+            update={
+                "path_results": path,
+            }
+        )
+
+def general(state: AppState) -> AppState:
     return {
-        "messages": state["messages"] + [{"role": "assistant", "content": draft}],
-        "draft_answer": draft
+        "final_answer":"사내 규정 및 직원 정보를 찾을 수 없습니다."
+        }
+
+def sql_gen_node(state: AppState) -> AppState:
+    prompt_db_structure= """"""
+    # 스키마 순회
+    for schema_name in inspector.get_schema_names():
+        if schema_name == db_name:
+            for table_name in inspector.get_table_names(schema=schema_name):
+                # 컬럼 이름과 타입 수집
+                columns = inspector.get_columns(table_name, schema=schema_name)
+                column_list = [
+                    f"{col['name']}"
+                    for col in columns
+                ]
+                prompt_db_structure += f'\n[DB 스키마]\n1.table_name: {table_name}\n2.columns: {column_list}'
+
+    prompt_sql = ChatPromptTemplate.from_messages(
+    [
+        ("system", f"너는 사용자 질문에 대한 답을 얻기 위해 아래 [DB 스키마]구조의 데이터베이스에서 필요한 데이터를 얻기위한 SQL 문을 만드는 역할이야. 절대 다른 문장을 붙이지 말고, SQL문으로만 답변해.{prompt_db_structure}"),
+        ("human", "{user_question}"),
+        MessagesPlaceholder("messages"),
+    ])
+    sql_chain = prompt_sql | llm.with_config({'temperature': 0})
+    output = sql_chain.invoke({"user_question": state['messages'], "messages": state["messages"]})
+    return {
+        "SQL_draft": output.content.split('</think>\n\n')[-1]
     }
 
-def reviewer_node(state: AppState) -> AppState:
-    user_q = state["messages"][-1]["content"]  # 간단히 마지막을 질문으로 사용
-    ai_ans = state.get("draft_answer", "")
-    out = reviewer_chain.invoke({"user_question": user_q, "ai_answer": ai_ans})
-    final = out.content if hasattr(out, "content") else str(out)
-    return {
-        "messages": state["messages"] + [{"role": "assistant", "content": final}],
-        "final_answer": final
+def sql_execute_node(state: AppState) -> AppState:
+    sql_draft = state["SQL_draft"]
+    try:
+        with engine.connect() as connection:
+            result = connection.execute(text(sql_draft))
+            rows = result.fetchall() 
+            for row in result:
+                print(row)
+        return {
+        "SQL_result": rows
     }
+    except Exception as e:
+         return {
+        "error_SQL": e
+    }
+            
+def rag_node(state: AppState) -> AppState:
+    return {
+        "RAG_result": "test"
+    }
+
 
 builder = StateGraph(AppState)
-builder.add_node("executor", executor_node)
-builder.add_node("reviewer", reviewer_node)
+# node
+builder.add_node("router", router_node)
+builder.add_node("rag_node", rag_node)
+builder.add_node("general", general)
+builder.add_node("sql_gen_node", sql_gen_node)
+builder.add_node("sql_execute_node", sql_execute_node)
+# edge
+builder.add_edge(START, "router")
 
-builder.add_edge(START, "executor")
-builder.add_edge("executor", "reviewer")
-builder.add_edge("reviewer", END)
+# builder.add_conditional_edges(
+#     "router",
+#     router_node,
+#     {
+#         "policy": "rag_node",
+#         "employee": "sql_gen_node",
+#         "unclear": "general"
+#     },
+# )
+builder.add_edge("sql_gen_node", "sql_execute_node")
+builder.add_edge("sql_execute_node", END)
+builder.add_edge("general", END)
+builder.add_edge("rag_node", END)
 
 checkpointer = MemorySaver()
-graph = builder.compile(checkpointer=checkpointer)
 
+#compile
+graph = builder.compile(checkpointer=checkpointer)
+# [{"role":"user","content":"김다연은 어느 부서, 어느 팀 사원이니?"}]
+# [HumanMessage(content="김다연은 어느 부서, 어느 팀 사원이니?")]
 # 실행 예시
 out = graph.invoke(
-    {"messages": [{"role":"user","content":"선릉역 근처에 있는 SDT라는 회사에서 가장 가까운 맛집을 알려줘"}]},
+    {"messages": [{"role":"user","content":"김다연은 어느 부서, 어느 팀 사원이니?"}], "error_SQL": None},
     {"configurable": {"thread_id": "t1"}}
 )
-print(out["final_answer"].split('</think>\n\n')[-1])
+print(out.keys())
+print(out.keys())
+print(out['error_SQL'])
+print(out['path_results'])
+print(out['SQL_draft'])
+print(out['SQL_result'])
 
-
-#--------------------------------------------------------------
-# 멀티 agent 생성 시 사용
-#route node 생성
-class GraphState(TypedDict, total=False):
-    messages: List[AnyMessage]      # 대화 메시지 목록
-    route: Literal["agent1", "agent2"]  # 라우팅 결과(상위에서 결정)
-
-class RouteDecision(BaseModel):
-    route: Literal["agent1", "agent2"]
-
-# llm이 구조화 출력 지원한다고 가정(예: .with_structured_output)
-route_llm = llm.with_structured_output(RouteDecision)
-
-def router_node(state: GraphState) -> GraphState:
-    system_prompt = (
-        "You are a router. Read the conversation and choose exactly one route: "
-        "'agent1' or 'agent2'. "
-        "Return JSON with key 'route' only."
-    )
-    # 최신 메시지 컨텍스트에 라우팅 지시를 덧붙여 판단
-    messages = (state.get("messages") or []) + [{"role": "system", "content": system_prompt}]
-    decision: RouteDecision = route_llm.invoke(messages)
-    return {"route": decision.route}  # 상태에 route만 갱신
-
-
-# 하위 에이전트 실행 노드
-def run_agent1(state: GraphState) -> GraphState:
-    # agent1은 messages 기반으로 동작/갱신
-    out = agent1.invoke({"messages": state["messages"]})
-    return {"messages": out["messages"]}
-
-def run_agent2(state: GraphState) -> GraphState:
-    out = agent2.invoke({"messages": state["messages"]})
-    return {"messages": out["messages"]}
-
-
-# 라우터의 route 값에 따라 분기
-def choose_route(state: GraphState) -> str:
-    # 반드시 "agent1" 또는 "agent2" 반환
-    return state["route"]
-
-# 그래프 구성
-builder = StateGraph(GraphState)
-
-builder.add_node("router", router_node)
-builder.add_node("agent1", run_agent1)
-builder.add_node("agent2", run_agent2)
-
-# 시작 → 라우터
-builder.add_edge(START, "router")
-builder.add_conditional_edges(
-    "router",
-    choose_route,
-    {
-        "agent1": "agent1",
-        "agent2": "agent2",
-    },
-)
-
-# 각 하위 에이전트 실행 후 종료
-builder.add_edge("agent1", END)
-builder.add_edge("agent2", END)
-# 컴파일
-graph = builder.compile(checkpointer=checkpointer, store=store)
-
-initial_state: GraphState = {
-    "messages": [{"role": "user", "content": "이 입력을 처리해줘"}]
-}
-
-# 스레드/대화 ID는 필요 시 지정
-result_state = graph.invoke(
-    initial_state,
-    config={"configurable": {"thread_id": "demo-thread"}}
-)
-
-# 최종 메시지 열람
-for m in result_state["messages"]:
-    print(m["role"], ":", m["content"])
-
-
-
-
-# graph visualization
-from IPython.display import Image, display
-
-try:
-    display(Image(graph.get_graph().draw_mermaid_png()))
-except Exception:
-    # This requires some extra dependencies and is optional
-    pass
+# 할 일
+# 에러가 난 경우, 해당 메세지를 참고해서 다시 sql문을 만드는 사이클 필요
+# AI 답변도 message 리스트에 저장하는 부분 추후에 적용 필요

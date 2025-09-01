@@ -3,7 +3,7 @@
 __pycache__
 *.pyc
 .env
-
+hr_files/
 /venv/*
 /logs/*
 /chromadb

@@ -31,11 +31,11 @@ from langgraph.graph import MessagesState, START, END, StateGraph
 from langgraph.graph.message import add_messages
 ## custom made libraries
 from toolings import taviliy_web_search_tool, get_menual_info, get_db_info
+
 ## other libraries
 from pydantic import BaseModel, Field
 from typing import Any, TypedDict, Annotated, Literal, List, Dict
 import getpass
-from typing import List
 import logging.handlers
 
 
@@ -112,8 +112,7 @@ agent = create_tool_calling_agent(llm, tools, prompt)
 agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=False) 
 # 검증 체인
 reviewer_chain = prompt_ch | llm
-class State(TypedDict):
-    messages: Annotated[list, add_messages]
+
 
 class AppState(TypedDict, total=False):
     # 대화(필요하면 계속 누적)
@@ -138,6 +137,8 @@ def executor_node(state: AppState) -> AppState:
     #     "messages": state["messages"] + [{"role": "assistant", "content": draft}],
     #     "draft_answer": draft
     # })
+    print("draft: ",draft)
+    print("state['messages']: ",state['messages'])
     print('stats의 messages: ',state['messages'])
     return {
         "messages": [str(draft)],
@@ -178,7 +179,6 @@ out = graph.invoke(
     {"configurable": {"thread_id": "t1"}}
 )
 print(out["final_answer"])
-
 
 
 out = graph.invoke(
