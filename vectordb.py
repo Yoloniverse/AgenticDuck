@@ -54,6 +54,102 @@ docs[0].to_json()
 
 
 
+#######################################
+import re
+from pathlib import Path
+from typing import List
+from langchain_community.vectorstores import FAISS
+from langchain_core.documents import Document
+import os
+# 임베딩: HuggingFaceEmbeddings (SentenceTransformers)
+from langchain_community.embeddings import HuggingFaceEmbeddings
+
+# === 설정 ===
+TXT_PATH = "/home/sdt/Workspace/dykim/Langraph/AgenticDuck/hr_files/appr_process.txt"         # 당신의 txt 경로
+CHROMA_DIR = "./chroma_db"         # Chroma 영구 저장 경로
+os.makedirs(CHROMA_DIR, exist_ok=True)
+COLLECTION = "approval_guide" 
+EMBEDDING_MODEL = "jhgan/ko-sbert-nli"  # 한국어 특화 임베딩 모델
+DEVICE = "cuda"                         # 'cuda' 가능
+NORMALIZE = True                       # 코사인 유사도에 적합
+
+# === 로더 & 청크 분할 ===
+def load_and_split_by_rule(path: str) -> List[Document]:
+    text = Path(path).read_text(encoding="utf-8")
+    # 줄 전체가 --- (3개 이상) 로만 이루어진 구분선 기준으로 split
+    chunks = re.split(r"(?m)^\s*-{3,}\s*$", text)
+    docs = []
+    for i, raw in enumerate(chunks):
+        chunk = raw.strip()
+        if not chunk:
+            continue
+        docs.append(
+            Document(
+                page_content=chunk,
+                metadata={
+                    "chunk_id": i,
+                    "source_path": str(Path(path).resolve()),
+                },
+            )
+        )
+    return docs
+
+docs = load_and_split_by_rule(TXT_PATH)
+print(f"총 청크 수: {len(docs)}")
+
+# === 임베딩 준비 ===
+emb = HuggingFaceEmbeddings(
+    model_name=EMBEDDING_MODEL,
+    model_kwargs={"device": DEVICE},
+    encode_kwargs={"normalize_embeddings": NORMALIZE},
+)
+
+# === 3) ChromaDB에 적재(영구 저장) ===
+vectordb = Chroma.from_documents(
+    documents=docs,
+    embedding=emb,
+    collection_name=COLLECTION,
+    persist_directory=CHROMA_DIR,
+)
+
+vectordb.persist()
+print(f"Chroma 인덱스 저장 완료: {CHROMA_DIR} / collection={COLLECTION}")
+
+
+
+
+# 문서 분할
+split_docs = []
+for i, doc in enumerate(documents):
+    chunks = text_splitter.create_documents([doc])
+    for j, chunk in enumerate(chunks):
+        chunk.metadata = {
+            "doc_id": i,
+            "chunk_id": j,
+            "source": metadatas[i].get("source", f"document_{i}") if metadatas else f"document_{i}",
+            **({} if metadatas is None else metadatas[i])
+        }
+        split_docs.append(chunk)
+
+# ChromaDB 생성
+self.vectorstore = Chroma.from_documents(
+    documents=split_docs,
+    embedding=self.embeddings,
+    persist_directory=self.db_path
+)
+
+# 메타데이터 저장
+metadata_info = {
+    "total_documents": len(documents),
+    "total_chunks": len(split_docs),
+    "embedding_model": EMBEDDING_MODEL,
+    "created_at": str(os.path.getctime(self.db_path)) if os.path.exists(self.db_path) else "now"
+}
+
+with open(DOCUMENTS_METADATA_PATH, 'w', encoding='utf-8') as f:
+    json.dump(metadata_info, f, ensure_ascii=False, indent=2)
+
+logger.info(f"DB 생성 완료. 총 {len(documents)}개 문서, {len(split_docs)}개 청크")
 
 
 

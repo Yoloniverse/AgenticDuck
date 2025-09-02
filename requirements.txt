@@ -9,3 +9,4 @@ langchain-tavily
 agentevals ##evals for agents in LangSmith?
 langgraph-cli[inmem]
 langmem
+chromadb

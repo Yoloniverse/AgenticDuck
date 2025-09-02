@@ -28,12 +28,17 @@ from langgraph.types import Command
 from pydantic import BaseModel, Field
 from typing import Any, TypedDict, Annotated, Literal, List, Dict, Optional
 import getpass
-from typing import List
 import logging.handlers
 
 #sql node
 from sqlalchemy import create_engine, text, inspect
-
+# for rag
+from langchain_core.documents import Document
+from langchain_community.embeddings import HuggingFaceEmbeddings
+import chromadb
+from chromadb.config import Settings
+from sentence_transformers import CrossEncoder
+from langchain_community.vectorstores import Chroma
 ######################################################################
 #                             Save Log                               #
 ######################################################################
@@ -51,6 +56,16 @@ log_fileHandler = logging.handlers.RotatingFileHandler(
 
 log_fileHandler.setFormatter(formatter)
 logger.addHandler(log_fileHandler)
+
+# chromadb 상수 정의
+CHROMA_DIR = "./chroma_db"
+EMBEDDING_MODEL = "jhgan/ko-sbert-nli"  # 한국어 특화 임베딩 모델
+RERANK_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"  # Rerank 모델
+COLLECTION = "approval_guide" 
+embeddings = None
+reranker = None
+vectorstore = None
+
 ## db 연결
 db_user = "admin"
 db_password = "sdt251327"
@@ -62,19 +77,16 @@ connection_string = f"mysql+pymysql://{db_user}:{db_password}@{db_host}/{db_name
 engine = create_engine(connection_string)
 connection = engine.connect()
 inspector = inspect(engine)
-
 ## Thread (세션)의 대화내용을 저장하기 위한 체크포인터 . 에이전트에 checkpointer를 전달하면서 여러 호출 간 상태 유지(short-term memory)
 #checkpointer = InMemorySaver()
 ## long-term memory를 위한 스토어. 모든 스레드에서 재활용할 수 있는 지식이 필요할 때 씀. 서비스가 running중일 때만 유지됨. 영구 저장은 DB를 사용해야 함.
 store = InMemoryStore()
-
 ## Ollama LLM 객체 만들기
 # ollama pul qwen3:8b 
 # 4bit 모델: "qwen3:8b-q4_K_M"
 # 8bit 모델: "qwen3:8b-q8_0"
 # 16bit 모델 : "qwen3:8b-fp16"
 llm = ChatOllama(model="qwen3:8b", base_url="http://127.0.0.1:11434", temperature=0.1)
-
 
 prompt_router = ChatPromptTemplate.from_messages(
     [
@@ -83,7 +95,6 @@ prompt_router = ChatPromptTemplate.from_messages(
         MessagesPlaceholder("messages")
     ]
 )
-
 
 # 메시지를 최대 3세트(6개)로 제한하는 함수
 def add_messages_with_limit(left: list, right: list, max_messages: int = 6) -> list:
@@ -103,9 +114,12 @@ class AppState(TypedDict, total=False):
     messages: Annotated[list[dict], lambda left, right: add_messages_with_limit(left, right, max_messages=6)]
     # router_node의 분기 결과
     path_results: str
-    # Executor가 생성한 초안
+    # for RAG
+    RAG_retrieved_docs: List[Document]
+    RAG_reranked_docs: List[Document]
     RAG_result: str
     error_RAG: str
+    # for DB search
     DB_schema:  str
     SQL_draft: str
     SQL_result: str
@@ -119,7 +133,7 @@ class AppState(TypedDict, total=False):
 # 출력 스키마 사용
 class OutputState(TypedDict):
     # 검토 후 통과한 최종 답변
-    final_answer: str                      # 외부로 반환하는 데이터
+    final_answer: str # 외부로 반환하는 데이터
 
 class RouteOut(BaseModel):
     route: Literal["policy", "employee", "unclear"]  # 결재규정 / 직원정보 / 불명확
@@ -130,7 +144,7 @@ class RouteOut(BaseModel):
 # 온도 0으로 결정성 높이기
 router_chain = prompt_router | llm.with_config({'temperature': 0}).with_structured_output(RouteOut)
 
-def router_node(state: AppState) -> Command[Literal["rag_node", "get_schema", "general"]]:
+def router_node(state: AppState) -> Command[Literal["rag_execute_node", "get_schema", "general"]]:
     '''
     사용자 질문을 보고 다음 스텝 분기를 정하는 노드
     '''
@@ -139,7 +153,7 @@ def router_node(state: AppState) -> Command[Literal["rag_node", "get_schema", "g
     path = output.route if output.confidence >= 0.6 else "unclear"
     if path == "policy":
         return Command(
-            goto="rag_node",
+            goto="rag_execute_node",
             update={
                 "path_results": path,
             }
@@ -309,8 +323,49 @@ def SQL_final_answer_gen(state: AppState) -> AppState:
     }
 
 
-            
-def rag_node(state: AppState) -> AppState:
+def rag_init_node(state: AppState) -> Command[Literal["rag_execute_node", END]]:
+    global embeddings, reranker, vectorstore
+    try:
+        embeddings = HuggingFaceEmbeddings(
+                model_name=EMBEDDING_MODEL,
+                model_kwargs={'device': 'cuda:0'},
+                encode_kwargs={'normalize_embeddings': True}
+            )
+        reranker = CrossEncoder(RERANK_MODEL)
+        # 기존 DB가 존재하는지 확인
+        if os.path.exists(CHROMA_DIR):
+            vectorstore = Chroma(
+                collection_name=COLLECTION,
+                persist_directory=CHROMA_DIR,
+                embedding_function=embeddings
+            )
+
+            return Command(
+                goto="rag_execute_node",
+                update={
+                    "error_RAG": None,
+                }
+            )
+        else:
+            return Command(
+                goto=END,
+                update={
+                    "error_RAG": "vectorestore initialize 실패",
+                }
+            )
+    except Exception as e:
+        print(f"error in initialize_RAG_comp: {e}")
+        return Command(
+                goto=END,
+                update={
+                    "error_RAG": "initialize_RAG_component 실패",
+                }
+            )
+        
+
+
+def rag_execute_node(state: AppState) -> AppState:
+
     return {
         "RAG_result": "test"
     }
@@ -319,7 +374,7 @@ def rag_node(state: AppState) -> AppState:
 builder = StateGraph(AppState)
 # node
 builder.add_node("router", router_node)
-builder.add_node("rag_node", rag_node)
+builder.add_node("rag_execute_node", rag_execute_node)
 builder.add_node("general", general)
 builder.add_node("get_schema", get_schema)
 builder.add_node("sql_gen_node", sql_gen_node)
@@ -340,38 +395,39 @@ builder.add_edge(START, "router")
 # )
 builder.add_edge("get_schema", "sql_gen_node")
 builder.add_edge("general", END)
-builder.add_edge("rag_node", END)
+builder.add_edge("rag_execute_node", END)
 
 checkpointer = MemorySaver()
 
 #compile
 graph = builder.compile(checkpointer=checkpointer)
-# [{"role":"user","content":"김다연은 어느 부서, 어느 팀 사원이니?"}]
-# [HumanMessage(content="김다연은 어느 부서, 어느 팀 사원이니?")]
-# 실행 예시
-out_1 = graph.invoke(
-    {"messages": [{"role":"user","content":"김다연은 어느 부서, 어느 팀 사원이니?"}], "error_SQL": None, "error_SQL_cnt": 0, "error_SQL_node": "none"},
-    {"configurable": {"thread_id": "t1"}}
-)
-print(out_1)
-print(out_1['SQL_draft'])
-print(out_1['SQL_result'])
-print(out_1['final_answer'])
+
+
 
 # 실행 예시
-out = graph.invoke(
-    {"messages": [{"role":"user","content":"QX 개발실에서 일하는 사람 이름을 다 알려줘"}], "error_SQL": None, "error_SQL_cnt": 0, "error_SQL_node": "none"},
-    {"configurable": {"thread_id": "t1"}}
-)
-#print(out.keys())
-#print(out)
-#print(out['error_SQL'])
-print(out['error_SQL_cnt'])
-#print(out['messages'])
-print(out['SQL_draft'])
-print(out['SQL_result'])
-print(out['final_answer'])
-# print(out['messages'][-1].content)
+# out_1 = graph.invoke(
+#     {"messages": [{"role":"user","content":"김다연은 어느 부서, 어느 팀 사원이니?"}], "error_SQL": None, "error_SQL_cnt": 0, "error_SQL_node": "none"},
+#     {"configurable": {"thread_id": "t1"}}
+# )
+# print(out_1)
+# print(out_1['SQL_draft'])
+# print(out_1['SQL_result'])
+# print(out_1['final_answer'])
+
+# # 실행 예시
+# out = graph.invoke(
+#     {"messages": [{"role":"user","content":"QX 개발실에서 일하는 사람 이름을 다 알려줘"}], "error_SQL": None, "error_SQL_cnt": 0, "error_SQL_node": "none"},
+#     {"configurable": {"thread_id": "t1"}}
+# )
+# #print(out.keys())
+# #print(out)
+# #print(out['error_SQL'])
+# print(out['error_SQL_cnt'])
+# #print(out['messages'])
+# print(out['SQL_draft'])
+# print(out['SQL_result'])
+# print(out['final_answer'])
+# # print(out['messages'][-1].content)
 
 
 # graph visualization
