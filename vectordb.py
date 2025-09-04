@@ -55,21 +55,24 @@ docs[0].to_json()
 
 
 #######################################
+from langchain.vectorstores import Chroma
 import re
 from pathlib import Path
 from typing import List
-from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 import os
 # 임베딩: HuggingFaceEmbeddings (SentenceTransformers)
 from langchain_community.embeddings import HuggingFaceEmbeddings
+
+from sentence_transformers import CrossEncoder
 
 # === 설정 ===
 TXT_PATH = "/home/sdt/Workspace/dykim/Langraph/AgenticDuck/hr_files/appr_process.txt"         # 당신의 txt 경로
 CHROMA_DIR = "./chroma_db"         # Chroma 영구 저장 경로
 os.makedirs(CHROMA_DIR, exist_ok=True)
 COLLECTION = "approval_guide" 
-EMBEDDING_MODEL = "jhgan/ko-sbert-nli"  # 한국어 특화 임베딩 모델
+EMBEDDING_MODEL = "BAAI/bge-m3" # 질의 인스트럭션을 자동으로 붙여서 질문-문서 정합성이 좋아짐
+#EMBEDDING_MODEL = "jhgan/ko-sbert-nli"  # 한국어 특화 임베딩 모델
 DEVICE = "cuda"                         # 'cuda' 가능
 NORMALIZE = True                       # 코사인 유사도에 적합
 
@@ -97,6 +100,7 @@ def load_and_split_by_rule(path: str) -> List[Document]:
 docs = load_and_split_by_rule(TXT_PATH)
 print(f"총 청크 수: {len(docs)}")
 
+
 # === 임베딩 준비 ===
 emb = HuggingFaceEmbeddings(
     model_name=EMBEDDING_MODEL,
@@ -116,50 +120,31 @@ vectordb.persist()
 print(f"Chroma 인덱스 저장 완료: {CHROMA_DIR} / collection={COLLECTION}")
 
 
-
-
-# 문서 분할
-split_docs = []
-for i, doc in enumerate(documents):
-    chunks = text_splitter.create_documents([doc])
-    for j, chunk in enumerate(chunks):
-        chunk.metadata = {
-            "doc_id": i,
-            "chunk_id": j,
-            "source": metadatas[i].get("source", f"document_{i}") if metadatas else f"document_{i}",
-            **({} if metadatas is None else metadatas[i])
-        }
-        split_docs.append(chunk)
-
-# ChromaDB 생성
-self.vectorstore = Chroma.from_documents(
-    documents=split_docs,
-    embedding=self.embeddings,
-    persist_directory=self.db_path
+# ===== (다음 실행부터) 로드 & 검색 =====
+vectordb = Chroma(
+    collection_name=COLLECTION,
+    persist_directory=CHROMA_DIR,  # ← 동일 경로
+    embedding_function=emb,            # ← 동일 임베딩으로 로드
 )
+query = "이 문서의 목차을 알려줘"
+retriever = vectordb.as_retriever(search_type="similarity", search_kwargs={"k": 5})
+hits = retriever.get_relevant_documents(query)
+documents = []
+for h in hits:
+    print(h.page_content[:].replace("\n"," "))
 
-# 메타데이터 저장
-metadata_info = {
-    "total_documents": len(documents),
-    "total_chunks": len(split_docs),
-    "embedding_model": EMBEDDING_MODEL,
-    "created_at": str(os.path.getctime(self.db_path)) if os.path.exists(self.db_path) else "now"
-}
+################ 리랭커 테스트 ############
+RERANK_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"  # Rerank 모델
+reranker = CrossEncoder(RERANK_MODEL)
+query_doc_pairs = [(query, doc.page_content) for doc in hits]
+scores = reranker.predict(query_doc_pairs)
 
-with open(DOCUMENTS_METADATA_PATH, 'w', encoding='utf-8') as f:
-    json.dump(metadata_info, f, ensure_ascii=False, indent=2)
+scored_docs = list(zip(scores, hits))
+scored_docs.sort(key=lambda x: x[0], reverse=True)
 
-logger.info(f"DB 생성 완료. 총 {len(documents)}개 문서, {len(split_docs)}개 청크")
-
-
-
-
-
-
-
-
-
-
+# 상위 k개 문서 반환
+top_k = 3
+reranked_docs = [doc for score, doc in scored_docs[:top_k]]
 
 
 
@@ -174,22 +159,6 @@ logger.info(f"DB 생성 완료. 총 {len(documents)}개 문서, {len(split_docs)
 
 # dir(vector_store)
 # vector_store.get('41015c4e-60fa-49ac-bffd-60a692450869')
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 

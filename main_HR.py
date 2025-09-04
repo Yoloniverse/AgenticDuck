@@ -39,6 +39,7 @@ import chromadb
 from chromadb.config import Settings
 from sentence_transformers import CrossEncoder
 from langchain_community.vectorstores import Chroma
+
 ######################################################################
 #                             Save Log                               #
 ######################################################################
@@ -57,14 +58,6 @@ log_fileHandler = logging.handlers.RotatingFileHandler(
 log_fileHandler.setFormatter(formatter)
 logger.addHandler(log_fileHandler)
 
-# chromadb 상수 정의
-CHROMA_DIR = "./chroma_db"
-EMBEDDING_MODEL = "jhgan/ko-sbert-nli"  # 한국어 특화 임베딩 모델
-RERANK_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"  # Rerank 모델
-COLLECTION = "approval_guide" 
-embeddings = None
-reranker = None
-vectorstore = None
 
 ## db 연결
 db_user = "admin"
@@ -115,17 +108,17 @@ class AppState(TypedDict, total=False):
     # router_node의 분기 결과
     path_results: str
     # for RAG
-    RAG_retrieved_docs: List[Document]
-    RAG_reranked_docs: List[Document]
-    RAG_result: str
-    error_RAG: str
+    rag_retrieved_docs: List[str]
+    rag_reranked_docs: List[str]
+    rag_check_cnt: int
+    rag_error: str
     # for DB search
-    DB_schema:  str
-    SQL_draft: str
-    SQL_result: str
-    error_SQL_cnt: int
-    error_SQL_node: str
-    error_SQL: Optional[str]    
+    sql_db_schema:  str
+    sql_draft: str
+    sql_result: str
+    sql_error_cnt: int
+    sql_error_node: str
+    sql_error: Optional[str]    
     hallucination_check: bool # source를 사용한 답변 생성 후 hallucination 검토 
     # 검토 후 통과한 최종 답변
     final_answer: str 
@@ -139,12 +132,14 @@ class RouteOut(BaseModel):
     route: Literal["policy", "employee", "unclear"]  # 결재규정 / 직원정보 / 불명확
     confidence: float = Field(ge=0, le=1)
 
+class HallucinationState(TypedDict):
+    result: bool
 
 # 라우터 체인
 # 온도 0으로 결정성 높이기
 router_chain = prompt_router | llm.with_config({'temperature': 0}).with_structured_output(RouteOut)
 
-def router_node(state: AppState) -> Command[Literal["rag_execute_node", "get_schema", "general"]]:
+def router_node(state: AppState) -> Command[Literal["rag_init_node", "get_schema", "general"]]:
     '''
     사용자 질문을 보고 다음 스텝 분기를 정하는 노드
     '''
@@ -153,7 +148,7 @@ def router_node(state: AppState) -> Command[Literal["rag_execute_node", "get_sch
     path = output.route if output.confidence >= 0.6 else "unclear"
     if path == "policy":
         return Command(
-            goto="rag_execute_node",
+            goto="rag_init_node",
             update={
                 "path_results": path,
             }
@@ -193,29 +188,29 @@ def get_schema(state: AppState) -> AppState:
                     ]
                     db_structure += f'\n[DB 스키마]\n{idx}.table_name: {table_name}\n{idx}.columns: {column_list}'
         return {
-            "DB_schema": db_structure
+            "sql_db_schema": db_structure
         }
     except Exception as e:
         return {
-        "error_SQL_node": "get_schema",
-        "error_SQL": e
+        "sql_error_node": "get_schema",
+        "sql_error": e
         }
 
 
 def sql_gen_node(state: AppState) -> Command[Literal["sql_execute_node", END]]:
     try:
         # error 메세지가 있으면 참고해서 생성
-        error_SQL = state["error_SQL"]
-        error_SQL_cnt = state["error_SQL_cnt"]
-        print(f"error_SQL_cnt: {error_SQL_cnt}")
+        sql_error = state["sql_error"]
+        sql_error_cnt = state["sql_error_cnt"]
+        print(f"sql_error_cnt: {sql_error_cnt}")
 
-        if error_SQL == None:
+        if sql_error == None:
             prompt_sql = ChatPromptTemplate.from_messages(
             [
                 ("system", f"""너는 사용자 질문에 대한 답을 얻기 위해 아래 [DB 스키마]구조의 데이터베이스에서 필요한 데이터를 얻기위한 SQL 문을 만드는 역할이야. 
                             충분히 생각하고 가장 답변을 잘 이끌어 낼 수있는 조건이 무엇일지 오랫동안 생각해. 절대 다른 문장을 붙이지 말고, SQL문으로만 답변해.
                             \n[DB 스키마]\n
-                            {state['DB_schema']}"""),
+                            {state['sql_db_schema']}"""),
                 ("human", "{user_question}"),
             ])
             sql_chain = prompt_sql | llm.with_config({'temperature': 0})
@@ -223,13 +218,13 @@ def sql_gen_node(state: AppState) -> Command[Literal["sql_execute_node", END]]:
             return Command(
                 goto="sql_execute_node",
                 update={
-                    "SQL_draft": output.content.split('</think>\n\n')[-1]
+                    "sql_draft": output.content.split('</think>\n\n')[-1]
                 }
             )
 
         # 에러 발생하여 최대 3번 다시 시도
-        elif error_SQL != None and error_SQL_cnt < 4:
-            print(f"SQL_draft: {state['SQL_draft']}")
+        elif sql_error != None and sql_error_cnt < 4:
+            print(f"sql_draft: {state['sql_draft']}")
             prompt_sql = ChatPromptTemplate.from_messages(
             [
                 ("system", f"""너는 사용자 질문에 대한 답을 얻기 위해 아래 [DB 스키마]구조의 데이터베이스에서 필요한 데이터를 얻기위한 SQL 문을 만드는 역할이야. 
@@ -238,26 +233,26 @@ def sql_gen_node(state: AppState) -> Command[Literal["sql_execute_node", END]]:
                             
                             [중요한 제약사항]
                             - 사용자 질문: {state['messages'][-1].content}
-                            - 이전에 실패한 SQL: {state['SQL_draft']}
-                            - 발생한 에러: {state['error_SQL']}
-                            - 이번은 {error_SQL_cnt}번째 시도입니다.
+                            - 이전에 실패한 SQL: {state['sql_draft']}
+                            - 발생한 에러: {state['sql_error']}
+                            - 이번은 {sql_error_cnt}번째 시도입니다.
                             - 절대 이전에 실패한 SQL과 같은 구조를 반복하지 말고, 완전히 다른 방식으로 접근해.
                             - SQL문으로만 답변해.
 
                             [DB 스키마]
-                            {state['DB_schema']}"""),
+                            {state['sql_db_schema']}"""),
                 ("human", "{user_question}"),
             ])
-            sql_chain = prompt_sql | llm.with_config({'temperature': 0.1 * error_SQL_cnt})
+            sql_chain = prompt_sql | llm.with_config({'temperature': 0.1 * sql_error_cnt})
             output = sql_chain.invoke({"user_question": state['messages'][-1].content}, config={"timeout": 30})
             return Command(
                 goto="sql_execute_node",
                 update={
-                    "SQL_draft": output.content.split('</think>\n\n')[-1]
+                    "sql_draft": output.content.split('</think>\n\n')[-1]
                 }
             )
 
-        elif error_SQL != None and error_SQL_cnt == 4:
+        elif sql_error != None and sql_error_cnt == 4:
             return Command(
                 goto=END,
                 update={
@@ -267,12 +262,12 @@ def sql_gen_node(state: AppState) -> Command[Literal["sql_execute_node", END]]:
 
     except Exception as e:
         return {
-            "error_SQL_node": "sql_gen_node",
-            "error_SQL": e
+            "sql_error_node": "sql_gen_node",
+            "sql_error": e
         }
 
-def sql_execute_node(state: AppState) -> Command[Literal["sql_gen_node", "SQL_final_answer_gen"]]:
-    sql_draft = state["SQL_draft"]
+def sql_execute_node(state: AppState) -> Command[Literal["sql_gen_node", "sql_final_answer_gen"]]:
+    sql_draft = state["sql_draft"]
     try:
         with engine.connect() as connection:
             result = connection.execute(text(sql_draft))
@@ -285,33 +280,32 @@ def sql_execute_node(state: AppState) -> Command[Literal["sql_gen_node", "SQL_fi
         # 빈 결과도 에러로 처리 
         else:
             return Command(
-            goto="SQL_final_answer_gen",
+            goto="sql_final_answer_gen",
             update={
-                "SQL_result": rows,
-                "error_SQL": None,
-            }
-        )
-            
+                "sql_result": rows,
+                "sql_error": None,
+                }
+            )
 
     # 실행 에러 발생 시 sql_gen_node 노드로 돌아가며, error 메시지를 저장하고 error count를 올림.
     except Exception as e:
         return Command(
             goto="sql_gen_node",
             update={
-                "error_SQL_node": "sql_execute_node",
-                "error_SQL": str(e),
-                "error_SQL_cnt": state['error_SQL_cnt'] + 1
-            }
-        )
+                "sql_error_node": "sql_execute_node",
+                "sql_error": str(e),
+                "sql_error_cnt": state['sql_error_cnt'] + 1
+                }
+            )
 
-def SQL_final_answer_gen(state: AppState) -> AppState:
-    SQL_result = state['SQL_result']
-    SQL_draft = state['SQL_draft']
+def sql_final_answer_gen(state: AppState) -> AppState:
+    sql_result = state['sql_result']
+    sql_draft = state['sql_draft']
     prompt_final = ChatPromptTemplate.from_messages(
     [
         ("system", f"""너는 사용자 질문에 대한 답변을 생성하는 역할이야. 아래 [정보]는 사용자의 질문을 기반으로 [SQL문]으로 필요한 정보를 DB에서 조회한 결과야. 정보에 없는 내용을 덧붙이거나 변형하여 환각을 일으키지 마.
-                    \n[SQL문]\n {SQL_draft}
-                    \n[정보]\n {SQL_result}"""),
+                    \n[SQL문]\n {sql_draft}
+                    \n[정보]\n {sql_result}"""),
         ("human", "{user_question}"),
         MessagesPlaceholder("messages")
     ])
@@ -322,67 +316,144 @@ def SQL_final_answer_gen(state: AppState) -> AppState:
         "final_answer": output.content.split('</think>\n\n')[-1]
     }
 
+class RAGManager:
+    def __init__(self):
+        # chromadb 상수 정의
+        self.CHROMA_DIR = "./chroma_db"
+        self.EMBEDDING_MODEL = "BAAI/bge-m3"  # 한국어 특화 임베딩 모델
+        self.RERANK_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"  # Rerank 모델
+        self.COLLECTION = "approval_guide" 
+        self.top_k = 3 # 프롬프트에 제공할 문서 갯수
+        self.embeddings = None
+        self.reranker = None
 
-def rag_init_node(state: AppState) -> Command[Literal["rag_execute_node", END]]:
-    global embeddings, reranker, vectorstore
-    try:
-        embeddings = HuggingFaceEmbeddings(
-                model_name=EMBEDDING_MODEL,
-                model_kwargs={'device': 'cuda:0'},
-                encode_kwargs={'normalize_embeddings': True}
-            )
-        reranker = CrossEncoder(RERANK_MODEL)
-        # 기존 DB가 존재하는지 확인
-        if os.path.exists(CHROMA_DIR):
-            vectorstore = Chroma(
-                collection_name=COLLECTION,
-                persist_directory=CHROMA_DIR,
-                embedding_function=embeddings
-            )
+    def rag_init_node(self, state: AppState) -> Command[Literal["rag_execute_node", END]]:
+        try:
+            if self.embeddings and self.reranker:
+                pass
+            else:
+                self.embeddings = HuggingFaceEmbeddings(
+                        model_name=self.EMBEDDING_MODEL,
+                        model_kwargs={'device': 'cuda:0'},
+                        encode_kwargs={'normalize_embeddings': True}
+                    )
+                self.reranker = CrossEncoder(self.RERANK_MODEL)
 
+            # 기존 DB가 존재하는지 확인
+            if os.path.exists(self.CHROMA_DIR):
+                self.vectorstore = Chroma(
+                    collection_name=self.COLLECTION,
+                    persist_directory=self.CHROMA_DIR,
+                    embedding_function=self.embeddings
+                )
+
+                return Command(
+                    goto="rag_execute_node",
+                    update={
+                        "rag_error": None,
+                    }
+                )
+            else:
+                return Command(
+                    goto=END,
+                    update={
+                        "rag_error": "vectorestore initialize 실패",
+                    }
+                )
+        except Exception as e:
+            print(f"error in initialize_RAG_comp: {e}")
             return Command(
-                goto="rag_execute_node",
-                update={
-                    "error_RAG": None,
-                }
-            )
+                    goto=END,
+                    update={
+                        "rag_error": "initialize_RAG_component 실패",
+                    }
+                )
+            
+
+    def rag_execute_node(self, state: AppState) -> AppState:
+        # retrive
+        self.retriever = self.vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 5})
+        documents = self.retriever.get_relevant_documents(state['messages'][-1].content)
+        # rerank
+        query_doc_pairs = [(state['messages'][-1].content, doc.page_content) for doc in documents]
+        scores = self.reranker.predict(query_doc_pairs)
+        scored_docs = list(zip(scores, documents))
+        scored_docs.sort(key=lambda x: x[0], reverse=True)
+        # 상위 k개 문서 반환
+        reranked_docs = [doc.page_content[:] for score, doc in scored_docs[:self.top_k]]
+
+        return {
+            "rag_retrieved_docs": documents,
+            "rag_reranked_docs": reranked_docs
+        }
+
+    def rag_final_answer_gen(self, state: AppState) -> AppState:
+        rag_reranked_docs = state['rag_reranked_docs']
+
+        prompt_final = ChatPromptTemplate.from_messages(
+        [
+            ("system", f"""너는 사용자 질문에 대한 답변을 생성하는 역할이야. 
+                        \n[조건]\n 아래 [정보]는 사용자의 질문을 기반으로 필요한 vectorDB에서 조회한 결과 문서야. 모르는 부분은 모른다고 대답하고, 정보에 없는 내용을 덧붙이거나 변형하여 환각을 일으키지 마.
+                        \n[정보]\n {rag_reranked_docs}"""),
+            ("human", "{user_question}"),
+            MessagesPlaceholder("messages")
+        ])
+        final_chain = prompt_final | llm.with_config({'temperature': 0})
+        output = final_chain.invoke({"user_question": state['messages'][-1].content, "messages": state["messages"]})
+        return {
+            "messages": AIMessage(content=output.content.split('</think>\n\n')[-1]),
+            "final_answer": output.content.split('</think>\n\n')[-1]
+        }
+
+    def hallucination_check(self, state: AppState) -> AppState:
+        rag_reranked_docs = state['rag_reranked_docs']
+        final_answer = state['final_answer']
+
+
+        prompt_check = ChatPromptTemplate.from_messages(
+        [
+            ("system", f"""너는 RAG(Retrieval-Augmented Generation)결과물인 [문서 정보]과 LLM 모델이 생성한 [생성 답변]을 비교하여, [생성 답변]에 [문서 정보]에 없는 내용이 포함되어있는지 hallucination 여부를 판단하는 역할이야.
+                        \n[조건]\n : hallucination 발생 시 True, 없을 시 False를 반환하시오. 다른 문장 없이 무조건 True 또는 False로만 답하세요.
+                        \n[문서 정보]\n {rag_reranked_docs}
+                        \n[생성 답변]\n {final_answer}
+                        """),
+            ("human", "{user_question}")
+        ])
+        final_chain = prompt_check | llm.with_config({'temperature': 0}).with_structured_output(HallucinationState)
+        output = final_chain.invoke({"user_question": state['messages'][-1].content})
+        check_result = output['result']
+
+        # hallucination 발생
+        if check_result:
+            return {
+                        "hallucination_check": check_result,
+                        "final_answer": state["final_answer"] + "\n* 이 답변은 정확하지 않은 정보를 포함하고 있는 점 참고바랍니다.\n"
+                    }
+        # hallucination 발생하지 않아서 종료
         else:
-            return Command(
-                goto=END,
-                update={
-                    "error_RAG": "vectorestore initialize 실패",
-                }
-            )
-    except Exception as e:
-        print(f"error in initialize_RAG_comp: {e}")
-        return Command(
-                goto=END,
-                update={
-                    "error_RAG": "initialize_RAG_component 실패",
-                }
-            )
-        
+            return {
+                        "hallucination_check": check_result,
+                    }
 
+    
 
-def rag_execute_node(state: AppState) -> AppState:
-
-    return {
-        "RAG_result": "test"
-    }
-
+rag_manager = RAGManager()
 
 builder = StateGraph(AppState)
 # node
 builder.add_node("router", router_node)
-builder.add_node("rag_execute_node", rag_execute_node)
 builder.add_node("general", general)
 builder.add_node("get_schema", get_schema)
 builder.add_node("sql_gen_node", sql_gen_node)
 builder.add_node("sql_execute_node", sql_execute_node)
-builder.add_node("SQL_final_answer_gen", SQL_final_answer_gen)
+builder.add_node("sql_final_answer_gen", sql_final_answer_gen)
+builder.add_node("rag_init_node", rag_manager.rag_init_node)
+builder.add_node("rag_execute_node", rag_manager.rag_execute_node)
+builder.add_node("rag_final_answer_gen", rag_manager.rag_final_answer_gen)
+builder.add_node("hallucination_check", rag_manager.hallucination_check)
 
 # edge
-builder.add_edge(START, "router")
+
 
 # builder.add_conditional_edges(
 #     "router",
@@ -393,9 +464,14 @@ builder.add_edge(START, "router")
 #         "unclear": "general"
 #     },
 # )
+builder.add_edge(START, "router")
 builder.add_edge("get_schema", "sql_gen_node")
+builder.add_edge("sql_final_answer_gen", END)
 builder.add_edge("general", END)
-builder.add_edge("rag_execute_node", END)
+builder.add_edge("rag_execute_node", "rag_final_answer_gen")
+builder.add_edge("rag_final_answer_gen", "hallucination_check")
+builder.add_edge("hallucination_check", END)
+
 
 checkpointer = MemorySaver()
 
@@ -406,35 +482,75 @@ graph = builder.compile(checkpointer=checkpointer)
 
 # 실행 예시
 # out_1 = graph.invoke(
-#     {"messages": [{"role":"user","content":"김다연은 어느 부서, 어느 팀 사원이니?"}], "error_SQL": None, "error_SQL_cnt": 0, "error_SQL_node": "none"},
+#     {"messages": [{"role":"user","content":"김다연은 어느 부서, 어느 팀 사원이니?"}], "sql_error": None, "sql_error_cnt": 0, "sql_error_node": "none"},
 #     {"configurable": {"thread_id": "t1"}}
 # )
 # print(out_1)
-# print(out_1['SQL_draft'])
-# print(out_1['SQL_result'])
+# print(out_1['sql_draft'])
+# print(out_1['sql_result'])
 # print(out_1['final_answer'])
 
 # # 실행 예시
 # out = graph.invoke(
-#     {"messages": [{"role":"user","content":"QX 개발실에서 일하는 사람 이름을 다 알려줘"}], "error_SQL": None, "error_SQL_cnt": 0, "error_SQL_node": "none"},
+#     {"messages": [{"role":"user","content":"QX 개발실에서 일하는 사람 이름을 다 알려줘"}], "sql_error": None, "sql_error_cnt": 0, "sql_error_node": "none"},
 #     {"configurable": {"thread_id": "t1"}}
 # )
 # #print(out.keys())
 # #print(out)
-# #print(out['error_SQL'])
-# print(out['error_SQL_cnt'])
+# #print(out['sql_error'])
+# print(out['sql_error_cnt'])
 # #print(out['messages'])
-# print(out['SQL_draft'])
-# print(out['SQL_result'])
+# print(out['sql_draft'])
+# print(out['sql_result'])
 # print(out['final_answer'])
 # # print(out['messages'][-1].content)
 
+# 실행 예시 RAG
+out_2 = graph.invoke(
+    {"messages": [{"role":"user","content":"외근 교통비 청구방법 알려줘"}], "sql_error": None, "rag_error": None, "sql_error_cnt": 0, "rag_check_cnt":0, "sql_error_node": "none"},
+    {"configurable": {"thread_id": "t1"}}
+)
+print(out_2)
+print(out_2['final_answer'])
 
-# graph visualization
+
+# 실행 예시 RAG
+out_2 = graph.invoke(
+    {"messages": [{"role":"user","content":"나는 쏘카 안썼는데, 외근 교통비 청구 어떻게 하니?"}], "sql_error": None, "rag_error": None, "sql_error_cnt": 0, "rag_check_cnt":0, "sql_error_node": "none"},
+    {"configurable": {"thread_id": "t1"}}
+)
+
+print(out_2['final_answer'])
+
+
+#graph visualization
+from IPython.display import Image, display
+
+try:
+    display(Image(graph.get_graph().draw_mermaid_png()))
+except Exception as e :
+    # This requires some extra dependencies and is optional
+    print(e)
+    pass
+
+
+# from langgraph.graph import draw_mermaid_png, MermaidDrawMethod
+
+# # 로컬 브라우저로 렌더링
+# draw_mermaid_png(
+#     graph, 
+#     draw_method=MermaidDrawMethod.PYPPETEER  # 로컬 렌더링
+# )
+
+
+# from langgraph.graph import MermaidDrawMethod
+
+# png = graph.get_graph().draw_mermaid_png(
+#     draw_method=MermaidDrawMethod.PYPPETEER,  # 원격(API) 안 쓰고 로컬에서 렌더
+#     max_retries=5, retry_delay=2.0
+# )
+
+
 # from IPython.display import Image, display
-
-# try:
-#     display(Image(graph.get_graph().draw_mermaid_png()))
-# except Exception:
-#     # This requires some extra dependencies and is optional
-#     pass
+# from langchain_core.runnables.graph import  MermaidDrawMethod
+# display(Image(graph.get_graph().draw_mermaid_png(draw_method=MermaidDrawMethod.PYPPETEER,)))
