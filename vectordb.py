@@ -144,7 +144,7 @@ scored_docs.sort(key=lambda x: x[0], reverse=True)
 
 # 상위 k개 문서 반환
 top_k = 3
-reranked_docs = [doc for score, doc in scored_docs[:top_k]]
+reranked_docs = [doc.page_content[:] for score, doc in scored_docs[:top_k]]
 
 
 
