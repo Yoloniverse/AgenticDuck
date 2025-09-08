@@ -524,7 +524,7 @@ print(out['final_answer'])
 # 실행 예시 RAG
 out_2 = graph.invoke(
     {"messages": [{"role":"user","content":"외근 교통비 청구방법 알려줘"}], "sql_error": None, "rag_error": None, "sql_error_cnt": 0, "rag_check_cnt":0, "sql_error_node": "none"},
-    {"configurable": {"thread_id": {"thread_id": "t1"}}}
+    {"configurable": {"thread_id": "t1"}}
 )
 #print(out_2)
 print(out_2['final_answer'])
