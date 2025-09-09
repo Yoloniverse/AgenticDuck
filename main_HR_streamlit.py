@@ -1,5 +1,6 @@
 
 import streamlit as st
+import uuid
 import os
 import traceback
 ## Langchain libraries
@@ -76,7 +77,8 @@ if "messages" not in st.session_state:
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "thread_id" not in st.session_state:
-    st.session_state.thread_id = "streamlit_session"
+    st.session_state.thread_id = str(uuid.uuid4())
+
 
 @st.cache_resource
 def initialize_graph():
@@ -344,9 +346,13 @@ def initialize_graph():
             sql_draft = state['sql_draft']
             prompt_final = ChatPromptTemplate.from_messages(
             [
-                ("system", f"""너는 사용자 질문에 대한 답변을 생성하는 역할이야. 아래 [정보]는 사용자의 질문을 기반으로 [SQL문]으로 필요한 정보를 DB에서 조회한 결과야. 정보에 없는 내용을 덧붙이거나 변형하여 환각을 일으키지 마.
-                            \n[SQL문]\n {sql_draft}
-                            \n[정보]\n {sql_result}"""),
+                ("system", f"""너는 질의응답 챗봇 시스템에서 사용자 질문에 대한 최종 답변을 생성하는 역할이야. 
+                            [조건]
+                             - 아래 [정보]는 사용자의 질문을 기반으로 [SQL문]으로 필요한 정보를 DB에서 조회한 결과야. 정보에 없는 내용을 덧붙이거나 변형하여 환각을 일으키지 마.
+                             - DB 스키마, 테이블 등 내부 정보를 사용자에게 노출하지마.
+                             - 한국어로 답변해.
+                            [SQL문]\n {sql_draft}
+                            [정보]\n {sql_result}"""),
                 ("human", "{user_question}"),
                 MessagesPlaceholder("messages")
             ])
@@ -433,9 +439,11 @@ def initialize_graph():
 
             prompt_final = ChatPromptTemplate.from_messages(
             [
-                ("system", f"""너는 사용자 질문에 대한 답변을 생성하는 역할이야. 
-                            \n[조건]\n 아래 [정보]는 사용자의 질문을 기반으로 문서에서 조회한 결과야. 결과에 없는 부분은 모른다고 대답하고, 정보에 없는 내용을 덧붙이거나 변형하여 환각을 일으키지 마. 
-                            \n[정보]\n {rag_reranked_docs}"""),
+                ("system", f"""너는 질의응답 챗봇 시스템에서 사용자 질문에 대한 최종 답변을 생성하는 역할이야. 
+                            [조건]
+                             - 아래 [정보]는 사용자의 질문을 기반으로 문서에서 조회한 결과야. 결과에 없는 부분은 모른다고 대답하고, 정보에 없는 내용을 덧붙이거나 변형하여 환각을 일으키지 마. 
+                             - 한국어로 답변해.
+                            [정보] \n {rag_reranked_docs}"""),
                 ("human", "{user_question}"),
                 MessagesPlaceholder("messages")
             ])
@@ -518,6 +526,7 @@ for message in st.session_state.chat_history:
     with st.chat_message(message["role"]):
         st.write(message["content"])
 
+
 if "execution_count" not in st.session_state:
     st.session_state.execution_count = 0
 
@@ -527,7 +536,7 @@ if prompt := st.chat_input("궁금한 것을 물어보세요!"):
     import time
     timestamp = time.time()
     st.session_state.execution_count += 1
-    logger.info(f"[{st.session_state.execution_count}번째 실행] 실행 시점: {timestamp} - 사용자 입력: {prompt}")
+    logger.info(f"[세션ID: {st.session_state.thread_id}] - [{st.session_state.execution_count}번째 실행] 실행 시점: {timestamp} - 사용자 입력: {prompt}")
     
     # 사용자 메시지 추가
     st.session_state.chat_history.append({"role": "user", "content": prompt})
