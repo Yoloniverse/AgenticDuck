@@ -7,3 +7,4 @@ hr_files/
 /venv/*
 /logs/*
 /chromadb
+*/nohup.out

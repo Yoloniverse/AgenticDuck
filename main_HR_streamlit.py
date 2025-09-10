@@ -86,7 +86,7 @@ if "thread_id" not in st.session_state:
 @st.cache_resource
 def initialize_graph():
     logger.info("채팅 초기화")
-    llm = ChatOllama(model="qwen3:8b", base_url="http://127.0.0.1:11434", temperature=0.1)
+    llm = ChatOllama(model="qwen3:8b", base_url="http://127.0.0.1:11434")
 
     # 메시지를 최대 3세트(6개)로 제한하는 함수
     def add_messages_with_limit(left: list, right: list, max_messages: int = 6) -> list:
@@ -103,8 +103,11 @@ def initialize_graph():
     class AppState(TypedDict, total=False):
         # 대화(필요하면 계속 누적)
         messages: Annotated[list[dict], lambda left, right: add_messages_with_limit(left, right, max_messages=6)]
+        query: str
         # router_node의 분기 결과
         path_results: str
+        web_results : List[str]
+        query_rewrite: Optional[bool]
         # for RAG
         rag_retrieved_docs: List[str]
         rag_reranked_docs: List[str]
@@ -130,6 +133,7 @@ def initialize_graph():
         # 검토 후 통과한 최종 답변
         final_answer: str # 외부로 반환하는 데이터
 
+
     class RouteOut(BaseModel):
         route: Literal["policy", "employee", "general"]  # 결재규정 / 직원정보 / 불명확
         confidence: float = Field(ge=0, le=1)
@@ -137,6 +141,9 @@ def initialize_graph():
     class HallucinationState(TypedDict):
         result: bool
         reason: str
+    class SearchState(TypedDict):
+        result: bool
+
 
     # 라우터 체인
     # 온도 0으로 결정성 높이기
@@ -160,7 +167,7 @@ def initialize_graph():
             ("human", "{user_question}"),
         ]
     )
-    router_chain = prompt_router | llm.with_config({'temperature': 0}).with_structured_output(RouteOut)
+    router_chain = prompt_router | llm.with_config({'temperature': 0.1}).with_structured_output(RouteOut)
 
     def router_node(state: AppState) -> Command[Literal["rag_init_node", "get_schema", "general", "security_filter"]]:
         '''
@@ -180,6 +187,7 @@ def initialize_graph():
                 goto="rag_init_node",
                 update={
                     "path_results": path,
+                    "query": state['messages'][-1].content
                 }
             )
         elif path == "employee":
@@ -187,6 +195,7 @@ def initialize_graph():
                 goto="get_schema",
                 update={
                     "path_results": path,
+                    "query": state['messages'][-1].content
                 }
             )
         elif path == "general":
@@ -194,6 +203,7 @@ def initialize_graph():
                 goto="general",
                 update={
                     "path_results": path,
+                    "query": state['messages'][-1].content
                 }
             )
         elif path == "security_filter":
@@ -201,6 +211,7 @@ def initialize_graph():
                 goto="general",
                 update={
                     "path_results": path,
+                    "query": state['messages'][-1].content
                 }
             )
 
@@ -217,31 +228,107 @@ def initialize_graph():
             MessagesPlaceholder("messages"),
             ("placeholder", "{agent_scratchpad}"),
         ])
-    agent = create_tool_calling_agent(llm.with_config({'temperature': 0.5}), tools, prompt_gen)
+    agent = create_tool_calling_agent(llm.with_config({'temperature': 0.3}), tools, prompt_gen)
     agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=False, return_intermediate_steps=True) 
     
-    def general(state: AppState) -> AppState:
+    def general(state: AppState) -> Command[Literal["query_rewrite", END]]:
         logger.info(' == [general] node init == ')
-        #gen_chain = prompt_gen | llm.with_config({'temperature': 0.5})
-        output = agent_executor.invoke({"user_question": state['messages'][-1].content, "messages": state["messages"]})
+        #output = agent_executor.invoke({"user_question": "오늘 한국은 며칠이야?", "messages": ["messages"]})
+        output = agent_executor.invoke({"user_question": state['query'], "messages": state["messages"]})
         tools_used = []
+        search_contents = []
         if 'intermediate_steps' in output and output['intermediate_steps']:
             tool_calls_made = True
             for step in output['intermediate_steps']:
-                if isinstance(step, tuple) and len(step) >= 1:
-                    action = step[0]
+                if len(step) >= 2:
+                    action, result = step[0], step[1]
                     if hasattr(action, 'tool'):
                         tools_used.append(action.tool)
+                    if isinstance(result, dict) and 'results' in result:
+                        for search_result in result['results']:
+                            if 'content' in search_result and search_result['content']:
+                                search_contents.append(search_result['content'].replace("{","(").replace("}",")"))
         else:
             tool_calls_made = False
 
         logger.info(f"tool_calls_made: {tool_calls_made}, tools_used: {tools_used}")
+
+        # 웹 검색 tool을 사용한 경우 검색 결과 검증
+        if tool_calls_made and  "taviliy_web_search_tool" in tools_used:
+            prompt_search_check = ChatPromptTemplate.from_messages(
+            [
+                ("system", f"""너는 사용자 질문과 [웹 검색 결과]를 비교하여 검색 결과가 사용자 질문에 대한 답변을 생성하는데 적합한지 판단하는 역할이야.
+                            [조건]
+                            - 다른 문장 붙이지 말고 True 또는 False로만 대답해.
+                            - 사용자 질문에 대한 답변으로 적합함 = True
+                            - 사용자 질문에 대한 답변으로 부족합 = False 
+                            [웹 검색 결과]
+                            {search_contents[0]}
+                            {search_contents[1]}
+                            {search_contents[2]}
+                            """),
+                ("human", "사용자 질문: {user_question}, 웹에서 검색된 결과가 사용자 질문에대한 답변으로 적합한지 판단해."),
+            ])
+            # .with_structured_output(SearchState)를 사용하면 적합하지 않은 결과를 적합하다고 판단, 사용하지않으면 정확하게 잘 판단함
+            check_chain = prompt_search_check | llm.with_config({'temperature': 0.2})
+            output_check = check_chain.invoke({"user_question": state['messages'][-1].content})
+            result = output_check.content.split('</think>\n\n')[-1]
+
+            # 웹 검색 결과가 답변하기 충분하여 종료
+            if result == 'True':
+                return Command(
+                            goto=END,
+                            update={
+                            "messages": AIMessage(content=output['output'].split('</think>\n\n')[-1]),
+                            "final_answer": output['output'].split('</think>\n\n')[-1],
+                            "tools_used": list(set(tools_used)),
+                            "tool_calls_made": tool_calls_made,
+                            "query_rewrite": False,
+                            }
+                    )
+            # 웹 검색 결과가 적합하지 않아 쿼리를 재작성
+            else:
+                return Command(
+                            goto="query_rewrite",
+                            update={
+                                "query_rewrite": True,
+                                "web_results": search_contents
+                            }
+                        )
+        else:
+            return Command(
+                            goto=END,
+                            update={
+                            "messages": AIMessage(content=output['output'].split('</think>\n\n')[-1]),
+                            "final_answer": output['output'].split('</think>\n\n')[-1],
+                            "tools_used": list(set(tools_used)),
+                            "tool_calls_made": tool_calls_made
+                            }
+                    )
+
+    def query_rewrite(state: AppState) -> AppState:
+        logger.info(' == [query_rewrite] node init == ')
+        web_results = state['web_results']
+        prompt_rewrite = ChatPromptTemplate.from_messages(
+        [
+            ("system", f"""You a question re-writer that converts an input question to a better version that is optimized for web searches.
+                        [조건]
+                         - Look at the input and try to reason about the underlying semantic intent / meaning.
+                         - 간결하게 답변하고 한국어로 답변해.
+                         - [이전 검색 결과]를 참고해서, 이런 결과가 안나올 수 있는 질문으로 생성해.
+                        [이전 검색 결과]
+                         - {web_results[0]}
+                         - {web_results[1]}
+                         - {web_results[2]}
+                        """),
+            ("human", "원래 사용자 질문: {user_question}, 웹 검색을 위해 개선된 질문을 생성해."),
+        ])
+        rewrite_chain = prompt_rewrite | llm.with_config({'temperature': 0.5})
+        output = rewrite_chain.invoke({"user_question": state['messages'][-1].content})
         return {
-            "messages": AIMessage(content=output['output'].split('</think>\n\n')[-1]),
-            "final_answer": output['output'].split('</think>\n\n')[-1],
-            "tools_used": list(set(tools_used)),
-            "tool_calls_made": tool_calls_made
-            }
+                "query": output.content.split('</think>\n\n')[-1],
+                }
+                    
 
     def security_filter(state: AppState) -> AppState:
         logger.info(' == [security_filter] node init == ')
@@ -572,6 +659,7 @@ def initialize_graph():
     # node
     builder.add_node("router", router_node)
     builder.add_node("general", general)
+    builder.add_node("query_rewrite", query_rewrite)
     builder.add_node("security_filter", security_filter)
     builder.add_node("get_schema", sql_manager.get_schema)
     builder.add_node("sql_gen_node", sql_manager.sql_gen_node)
@@ -586,7 +674,7 @@ def initialize_graph():
     builder.add_edge(START, "router")
     builder.add_edge("get_schema", "sql_gen_node")
     builder.add_edge("sql_final_answer_gen", END)
-    builder.add_edge("general", END)
+    builder.add_edge("query_rewrite", "general")
     builder.add_edge("rag_execute_node", "rag_final_answer_gen")
     builder.add_edge("rag_final_answer_gen", "hallucination_check")
     builder.add_edge("hallucination_check", END)

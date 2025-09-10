@@ -37,9 +37,9 @@ https://python.langchain.com/docs/integrations/tools/tavily_search/
 @tool
 def taviliy_web_search_tool(query: str) -> str:
     """For information that changes in real time—such as the latest news or weather—that is not captured within the LLM’s training data, relevant results are provided through web search."""
-    
     search_tool = TavilySearch(max_results=3)
     result = search_tool.invoke(query)
+    
     logger.info(f"result: {result}")
     #answer = result['results'][0]['content']
     return result
