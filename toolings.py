@@ -1,29 +1,16 @@
-
 from langchain.agents import tool
 from langchain_tavily import TavilySearch
 from typing import List
-import logging.handlers
+import logging
 import os
-## 호준 Tavily API Key
-os.environ["TAVILY_API_KEY"] = "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"
+from dotenv import load_dotenv
 
 ######################################################################
 #                             Save Log                               #
 ######################################################################
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-log_max_size = 1024000
-log_file_count = 3
-log_fileHandler = logging.handlers.RotatingFileHandler(
-        filename=f"/home/sdt/Workspace/mvai/AgenticRAG/logs/agent.log",
-        maxBytes=log_max_size,
-        backupCount=log_file_count,
-        mode='a')
-
-log_fileHandler.setFormatter(formatter)
-logger.addHandler(log_fileHandler)
-
+load_dotenv()
+# main에서 만든 것과 동일한 이름 사용
+logger = logging.getLogger("Agent")
 
 
 ## 더미 날씨 툴 함수 만들기
@@ -35,9 +22,6 @@ def get_current_weather(city: str) -> dict:
         return {"city": "Seoul", "temperature": "25C", "conditions": "Sunny"}
     else:
         return {"city": city, "temperature": "N/A", "conditions": "Unknown"}
-
-
-
 
 
 """
@@ -52,13 +36,13 @@ https://python.langchain.com/docs/integrations/tools/tavily_search/
 ## 타빌리 서치엔진 툴 객체 만들기
 @tool
 def taviliy_web_search_tool(query: str) -> str:
-    """Search the web using Tavily."""
+    """For information that changes in real time—such as the latest news or weather—that is not captured within the LLM’s training data, relevant results are provided through web search."""
     
-    search_tool = TavilySearch(max_results=1)
+    search_tool = TavilySearch(max_results=3)
     result = search_tool.invoke(query)
     logger.info(f"result: {result}")
-    answer = result['results'][0]['content']
-    return answer
+    #answer = result['results'][0]['content']
+    return result
 
 ## 더미 유저 검증 툴 함수 만들기
 @tool
@@ -69,3 +53,15 @@ def validate_user(user_id: int, addresses: List[str]) -> bool:
         addresses (List[str]): Previous addresses as a list of strings.
     """
     return True
+
+@tool
+def get_menual_info(query: str) -> str:
+    """Searches equipment manuals for usage instructions, specifications, and maintenance methods."""
+    answer = "Restart the device."
+    return answer
+
+@tool
+def get_db_info(query: str) -> int:
+    """Search the equipment raw data from database"""
+    answer = 10
+    return answer
