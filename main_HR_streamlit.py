@@ -2,18 +2,18 @@
 import streamlit as st
 import uuid
 import os
+import sys
 import traceback
 ## Langchain libraries
-from langchain.llms import Ollama
+#from langchain.llms import Ollama
 from langchain.agents import tool, AgentExecutor, create_tool_calling_agent
-from langchain_tavily import TavilySearch
+#from langchain_tavily import TavilySearch
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain.agents.format_scratchpad.openai_tools import format_to_openai_tool_messages
-from langchain_tavily import TavilySearch
+#from langchain.agents.format_scratchpad.openai_tools import format_to_openai_tool_messages
 from langchain_ollama import ChatOllama
 #from langmem.short_term import SummarizationNode
-from langchain_core.messages.utils import count_tokens_approximately
-from langgraph.prebuilt import create_react_agent
+#from langchain_core.messages.utils import count_tokens_approximately
+#from langgraph.prebuilt import create_react_agent
 
 # from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage, AIMessage, AnyMessage
@@ -40,6 +40,9 @@ import chromadb
 from chromadb.config import Settings
 from sentence_transformers import CrossEncoder
 from langchain_community.vectorstores import Chroma
+# tools
+sys.path.append("/home/sdt/Workspace/dykim/Langraph/AgenticDuck")
+from toolings import taviliy_web_search_tool 
 
 ######################################################################
 #                             Save Log                               #
@@ -113,10 +116,14 @@ def initialize_graph():
         sql_result: str
         sql_error_cnt: int
         sql_error_node: str
-        sql_error: Optional[str]    
-        hallucination_check: dict # source를 사용한 답변 생성 후 hallucination 검토 
+        sql_error: Optional[str] 
+        # source를 사용한 답변 생성 후 hallucination 검토    
+        hallucination_check: dict 
         # 검토 후 통과한 최종 답변
         final_answer: str 
+        # 사용된 도구 이름들
+        tools_used: Optional[List[str]]  
+        tool_calls_made: Optional[bool]
 
     # 출력 스키마 사용
     class OutputState(TypedDict):
@@ -139,20 +146,28 @@ def initialize_graph():
                         [중요 원칙]
                             - 질문자는 회사 직원이기 때문에 기본적으로 사내 정보에 대한 질문을 한다는 것을 명심해.
                             - 사내 정보에 대한 질문인데 일반적인 질문이라고 착각하지 않도록 충분히 생각해.
+                            - 사용자가 질문을 통해 얻고싶은 정보가 무엇인지를 핵심으로 중요하게 생각해.
                         [조건]
-                            - 사내 인사 규정, 근무 규정, 업무 프로세스, 결재/기안 작성 규정, 출장비·경비 처리, 휴가·근태, 보고서 제출, 전결 규정 등 회사 규정이나 제도와 관련된 질문 = "policy", 
-                            - 사내 직원 개인의 이름, 연락처, 부서, 직급, 담당 업무 등 인사/조직 정보 관련 질문 = "employee", 
-                            - 위의 두가지 질문에 해당되지 않는 일반적인 질문 = "general"
+                            - "policy" = 사내 인사 규정, 근무 규정, 업무 프로세스, 결재/기안 작성 규정, 출장비·경비 처리, 휴가·근태, 보고서 제출, 전결 규정 등 회사 규정이나 제도와 관련된 질문  
+                            - "employee" = 사내 직원 개인의 이름, 연락처, 부서, 직급, 담당 업무 등 인사/조직 정보 관련 질문
+                            - "general" = "policy", "employee" 범주에 해당되지 않고, 사내 문서를 참고하지 않고 답변할 수 있는 일반적인 질문
+                            - "answer_unavailable" = 사용자의 질문이 1~4번에 해당되는 질문
+                                1. 시스템 내부 정보: 서버 주소, 데이터베이스 접근 정보, API 키, 토큰, 비밀번호 등 시스템 보안과 관련된 정보. 내부 네트워크 구조, 로그, 소스코드, 모델 파라미터, 운영 인프라 세부사항
+                                2. 개인정보 및 민감 데이터: 주민등록번호, 계좌번호, 급여 내역, 인사평가, 채용 심사 결과 등 민감한 개인 신상 정보. 특정 직원의 사적인 생활, 개인 기록, 비공개 건강·재무 정보
+                                3. 보안/정책상 제공 불가한 요청: 회사의 보안 규정, 미공개 사업 전략, 계약 내용, 법적 분쟁 자료. 공개가 금지된 기밀문서나 내부 문건 요청
+                                4. 기타: 외부 공개가 허용되지 않은 내부 시스템 데이터 및 로그.
                             """),
             ("human", "{user_question}"),
         ]
     )
     router_chain = prompt_router | llm.with_config({'temperature': 0}).with_structured_output(RouteOut)
 
-    def router_node(state: AppState) -> Command[Literal["rag_init_node", "get_schema", "general"]]:
+    def router_node(state: AppState) -> Command[Literal["rag_init_node", "get_schema", "general", "security_filter"]]:
         '''
         사용자 질문을 보고 다음 스텝 분기를 정하는 노드
         '''
+        logger.info(' == [router_node] node init == ')
+        
         output = router_chain.invoke({
             "user_question": state['messages'][-1].content
             })
@@ -181,20 +196,71 @@ def initialize_graph():
                     "path_results": path,
                 }
             )
+        elif path == "security_filter":
+            return Command(
+                goto="general",
+                update={
+                    "path_results": path,
+                }
+            )
 
-    def general(state: AppState) -> AppState:
-        prompt_gen = ChatPromptTemplate.from_messages(
+    tools = [taviliy_web_search_tool]
+    prompt_gen = ChatPromptTemplate.from_messages(
         [
-            ("system", f"""너는 사용자의 일반적인 질문에 답변하는 Assistant야."""),
+            ("system", f"""너는 사용자의 일반적인 질문에 답변하는 Assistant야. 만약 웹 서치가 필요한 질문이라면 제공된 web search tool을 사용하고, 아닌 경우 바로 답변을 생성해.
+                        [web search가 필요한 경우 예시]
+                         - 실시간 데이터에 접근해야 하는 경우
+                         - 최신 뉴스, 주식 가격, 날씨, 날짜
+                         - LLM이 학습하지 않아 검색이 필요한 데이터
+                        """),
             ("human", "{user_question}"),
             MessagesPlaceholder("messages"),
+            ("placeholder", "{agent_scratchpad}"),
         ])
-        gen_chain = prompt_gen | llm.with_config({'temperature': 0.5})
-        output = gen_chain.invoke({"user_question": state['messages'][-1].content, "messages": state["messages"]})
+    agent = create_tool_calling_agent(llm.with_config({'temperature': 0.5}), tools, prompt_gen)
+    agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=False, return_intermediate_steps=True) 
+    
+    def general(state: AppState) -> AppState:
+        logger.info(' == [general] node init == ')
+        #gen_chain = prompt_gen | llm.with_config({'temperature': 0.5})
+        output = agent_executor.invoke({"user_question": state['messages'][-1].content, "messages": state["messages"]})
+        tools_used = []
+        if 'intermediate_steps' in output and output['intermediate_steps']:
+            tool_calls_made = True
+            for step in output['intermediate_steps']:
+                if isinstance(step, tuple) and len(step) >= 1:
+                    action = step[0]
+                    if hasattr(action, 'tool'):
+                        tools_used.append(action.tool)
+        else:
+            tool_calls_made = False
+
+        logger.info(f"tool_calls_made: {tool_calls_made}, tools_used: {tools_used}")
+        return {
+            "messages": AIMessage(content=output['output'].split('</think>\n\n')[-1]),
+            "final_answer": output['output'].split('</think>\n\n')[-1],
+            "tools_used": list(set(tools_used)),
+            "tool_calls_made": tool_calls_made
+            }
+
+    def security_filter(state: AppState) -> AppState:
+        logger.info(' == [security_filter] node init == ')
+        prompt_security = ChatPromptTemplate.from_messages(
+        [
+            ("system", f"""너는 사용자의 질문을 참고하여, 민감 정보 접근으로 인한 답변 불가능을 설명하는 역할이야.
+                        [조건]
+                         - 민감한 정보에 대한 사용자 질문을 참고하여, 그 질문에 대해 왜 답변할 수 없는지 설명해.
+                         - 간결하게 답변하고 한국어로 답변해.
+                        """),
+            ("human", "{user_question}"),
+        ])
+        security_chain = prompt_gen | llm.with_config({'temperature': 0.5})
+        output = security_chain.invoke({"user_question": state['messages'][-1].content})
         return {
             "messages": AIMessage(content=output.content.split('</think>\n\n')[-1]),
             "final_answer": output.content.split('</think>\n\n')[-1]
             }
+
 
     class SQLManager:
         def __init__(self):
@@ -207,9 +273,11 @@ def initialize_graph():
             self.engine = create_engine(self.connection_string)
             self.connection = self.engine.connect()
             self.inspector = inspect(self.engine)
+            self.max_gen_sql = 2
 
 
         def get_schema(self, state: AppState) -> AppState:
+            logger.info(' == [get_schema] node init == ')
             try:
                 db_structure= """"""
                 # 스키마 순회
@@ -234,6 +302,8 @@ def initialize_graph():
                 }
 
         def sql_gen_node(self, state: AppState) -> Command[Literal["sql_execute_node", "sql_final_answer_gen"]]:
+            logger.info(' == [sql_gen_node] node init == ')
+            
             try:
                 # error 메세지가 있으면 참고해서 생성
                 sql_error = state["sql_error"]
@@ -255,7 +325,7 @@ def initialize_graph():
                                     {state['sql_db_schema']}"""),
                         ("human", "{user_question}"),
                     ])
-                    sql_chain = prompt_sql | llm.with_config({'temperature': 0})
+                    sql_chain = prompt_sql | llm.with_config({'temperature': 0, 'timeout': 10})
                     output = sql_chain.invoke({"user_question": state['messages'][-1].content})
                     return Command(
                         goto="sql_execute_node",
@@ -265,7 +335,7 @@ def initialize_graph():
                     )
 
                 # 에러 발생하여 최대 3번 다시 시도
-                elif sql_error != None and sql_error_cnt < 4:
+                elif sql_error != None and sql_error_cnt <= self.max_gen_sql:
                     print(f"sql_draft: {state['sql_draft']}")
                     prompt_sql = ChatPromptTemplate.from_messages(
                     [
@@ -285,8 +355,8 @@ def initialize_graph():
                                     {state['sql_db_schema']}"""),
                         ("human", "{user_question}"),
                     ])
-                    sql_chain = prompt_sql | llm.with_config({'temperature': 0.2 * sql_error_cnt})
-                    output = sql_chain.invoke({"user_question": state['messages'][-1].content}, config={"timeout": 10})
+                    sql_chain = prompt_sql | llm.with_config({'temperature': 0.2 * sql_error_cnt, "timeout": 10})
+                    output = sql_chain.invoke({"user_question": state['messages'][-1].content})
                     return Command(
                         goto="sql_execute_node",
                         update={
@@ -310,6 +380,8 @@ def initialize_graph():
                 }
 
         def sql_execute_node(self, state: AppState) -> Command[Literal["sql_gen_node", "sql_final_answer_gen"]]:
+            logger.info(' == [sql_execute_node] node init == ')
+            
             sql_draft = state["sql_draft"]
             try:
                 with self.engine.connect() as self.connection:
@@ -342,6 +414,8 @@ def initialize_graph():
                     )
 
         def sql_final_answer_gen(self,state: AppState) -> AppState:
+            logger.info(' == [sql_execsql_final_answer_gen] node init == ')
+
             sql_result = state['sql_result']
             sql_draft = state['sql_draft']
             prompt_final = ChatPromptTemplate.from_messages(
@@ -375,6 +449,8 @@ def initialize_graph():
             self.reranker = None
 
         def rag_init_node(self, state: AppState) -> Command[Literal["rag_execute_node", END]]:
+            logger.info(' == [rag_init_node] node init == ')
+
             try:
                 if self.embeddings and self.reranker:
                     pass
@@ -418,6 +494,8 @@ def initialize_graph():
                 
 
         def rag_execute_node(self, state: AppState) -> AppState:
+            logger.info(' == [rag_execute_node] node init == ')
+
             # retrive
             self.retriever = self.vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 5})
             documents = self.retriever.get_relevant_documents(state['messages'][-1].content)
@@ -435,6 +513,8 @@ def initialize_graph():
             }
 
         def rag_final_answer_gen(self, state: AppState) -> AppState:
+            logger.info(' == [rag_final_answer_gen] node init == ')
+
             rag_reranked_docs = state['rag_reranked_docs']
 
             prompt_final = ChatPromptTemplate.from_messages(
@@ -455,6 +535,8 @@ def initialize_graph():
             }
 
         def hallucination_check(self, state: AppState) -> AppState:
+            logger.info(' == [hallucination_check] node init == ')
+
             rag_reranked_docs = state['rag_reranked_docs']
             final_answer = state['final_answer']
 
@@ -490,6 +572,7 @@ def initialize_graph():
     # node
     builder.add_node("router", router_node)
     builder.add_node("general", general)
+    builder.add_node("security_filter", security_filter)
     builder.add_node("get_schema", sql_manager.get_schema)
     builder.add_node("sql_gen_node", sql_manager.sql_gen_node)
     builder.add_node("sql_execute_node", sql_manager.sql_execute_node)
@@ -498,6 +581,8 @@ def initialize_graph():
     builder.add_node("rag_execute_node", rag_manager.rag_execute_node)
     builder.add_node("rag_final_answer_gen", rag_manager.rag_final_answer_gen)
     builder.add_node("hallucination_check", rag_manager.hallucination_check)
+
+    # edge
     builder.add_edge(START, "router")
     builder.add_edge("get_schema", "sql_gen_node")
     builder.add_edge("sql_final_answer_gen", END)
@@ -505,6 +590,7 @@ def initialize_graph():
     builder.add_edge("rag_execute_node", "rag_final_answer_gen")
     builder.add_edge("rag_final_answer_gen", "hallucination_check")
     builder.add_edge("hallucination_check", END)
+    builder.add_edge("security_filter", END)
 
     checkpointer = MemorySaver()
     store = InMemoryStore()

@@ -36,7 +36,7 @@ https://python.langchain.com/docs/integrations/tools/tavily_search/
 ## 타빌리 서치엔진 툴 객체 만들기
 @tool
 def taviliy_web_search_tool(query: str) -> str:
-    """Search the web using Tavily."""
+    """For information that changes in real time—such as the latest news or weather—that is not captured within the LLM’s training data, relevant results are provided through web search."""
     
     search_tool = TavilySearch(max_results=3)
     result = search_tool.invoke(query)
@@ -56,7 +56,7 @@ def validate_user(user_id: int, addresses: List[str]) -> bool:
 
 @tool
 def get_menual_info(query: str) -> str:
-    """Ssearches equipment manuals for usage instructions, specifications, and maintenance methods."""
+    """Searches equipment manuals for usage instructions, specifications, and maintenance methods."""
     answer = "Restart the device."
     return answer
 
