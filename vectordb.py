@@ -49,6 +49,11 @@ vector_store = Chroma(
     persist_directory="./chromadb",
     embedding_function=ollama_embeddings
 )
+
+retriever = vector_store.as_retriever(search_type="similarity_score_threshold", search_kwargs={"score_threshold": 0.7, "k": 5})
+docs = retriever.invoke("what did the president say about ketanji brown jackson?")
+
+
 docs = vector_store.similarity_search("metrics of glass model", k=2)
 docs[0].to_json()
 
@@ -59,6 +64,27 @@ docs[0].to_json()
 
 
 
+### rerank
+from langchain.retrievers import ContextualCompressionRetriever
+from langchain.retrievers.document_compressors import CrossEncoderReranker
+from langchain_community.cross_encoders import HuggingFaceCrossEncoder
+
+# 모델 초기화
+model = HuggingFaceCrossEncoder(model_name="BAAI/bge-reranker-v2-m3")
+
+# 상위 3개의 문서 선택
+compressor = CrossEncoderReranker(model=model, top_n=3)
+
+# 문서 압축 검색기 초기화
+compression_retriever = ContextualCompressionRetriever(
+    base_compressor=compressor, base_retriever=retriever
+)
+
+# 압축된 문서 검색
+compressed_docs = compression_retriever.invoke("Word2Vec 에 대해서 알려줄래?")
+
+# 문서 출력
+pretty_print_docs(compressed_docs)
 
 
 

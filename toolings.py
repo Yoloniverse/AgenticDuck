@@ -1,9 +1,37 @@
 
 from langchain.agents import tool
 from langchain_tavily import TavilySearch
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_ollama import OllamaEmbeddings
+from langchain.vectorstores import Chroma
+from langchain_mcp_adapters.client import MultiServerMCPClient
+### rerank
+from langchain.retrievers import ContextualCompressionRetriever
+from langchain.retrievers.document_compressors import CrossEncoderReranker
+from langchain_community.cross_encoders import HuggingFaceCrossEncoder
+
+
 from typing import List
 import logging.handlers
 import os
+from pprint import pprint
+
+
+ollama_embeddings = OllamaEmbeddings(model="llama3.1")
+vector_store = Chroma(
+    persist_directory="./chromadb",
+    embedding_function=ollama_embeddings
+)
+retriever = vector_store.as_retriever(search_type="similarity_score_threshold", search_kwargs={"score_threshold": 0.7, "k": 5})
+
+# 모델 초기화
+rerank_model = HuggingFaceCrossEncoder(model_name="BAAI/bge-reranker-v2-m3")
+# 상위 3개의 문서 선택
+compressor = CrossEncoderReranker(model=rerank_model, top_n=3)
+# 문서 압축 검색기 초기화
+compression_retriever = ContextualCompressionRetriever(
+    base_compressor=compressor, base_retriever=retriever
+)
 ## 호준 Tavily API Key
 os.environ["TAVILY_API_KEY"] = "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"
 
@@ -30,7 +58,6 @@ logger.addHandler(log_fileHandler)
 @tool
 def get_current_weather(city: str) -> dict:
     """Get the current weather for a specified city."""
-    ## 실제 날씨 API 호출 로직
     if city == "Seoul":
         return {"city": "Seoul", "temperature": "25C", "conditions": "Sunny"}
     else:
@@ -69,3 +96,24 @@ def validate_user(user_id: int, addresses: List[str]) -> bool:
         addresses (List[str]): Previous addresses as a list of strings.
     """
     return True
+
+
+
+
+@tool
+def document_retriever(query: str) -> str:
+    """Retrieve relevant documents stored in the local vector database server.
+    Args:
+        query: user input in text
+    """
+    retrieved_docs = retriever.invoke(query)
+    # 압축된 문서 검색
+    compressed_retrieved_docs = compression_retriever.invoke("Word2Vec 에 대해서 알려줄래?")
+    # 문서 출력
+    pprint(compressed_retrieved_docs)
+    return compressed_retrieved_docs
+
+
+
+
+

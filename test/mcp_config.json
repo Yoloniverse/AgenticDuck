@@ -1,0 +1,17 @@
+
+
+{
+    "mcpServers": {
+      "duckduckgo-mcp-server": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "@smithery/cli@latest",
+          "run",
+          "@nickclyde/duckduckgo-mcp-server",
+          "--key",
+          "c4718807-23a0-4979-a1f2-348ee6e37b20"
+        ]
+      }
+    }
+  }

@@ -125,33 +125,47 @@ pprint(mcp_config_websearch)
 ## mcp server들을 LangChain의 mcp client adapter로 연결
 websearch_client = MultiServerMCPClient(mcp_config_websearch)
 ## 연결된 툴들 조회 
-websearch_tools = await websearch_client.get_tools()
-pprint(websearch_tools)
+tools = await websearch_client.get_tools()
+pprint(tools)
 
 
 ###############
 ## LangGraph 에이전트 구축
 
-## 1. LangGraph의 pre-built ReAct agent 생성 (가장 기초적), 3개의 agent 따로 만들기 
+## 1. LangGraph의 pre-built ReAct agent 생성 (가장 기초적)
+agent = create_react_agent(
+    llm,
+    tools,
+)
+    # checkpointer=checkpointer)
+
+## 
+await agent.ainvoke({"messages": "what's (3 + 5) x 12?"})
+
+await agent.stream({"messages": [{"role": "user", "content": "who is the mayor of NYC?"}]})
+await agent.astream({"messages": [{"role": "user", "content": "who is the mayor of NYC?"}]})
+
+
+
 
 websearch_agent = create_react_agent(
-    model=llm,
-    tools=websearch_tools,
+    model="openai:gpt-4.1",
+    tools=[add, multiply, divide],
     prompt=(
-        "You are a websearch agent.\n\n"
+        "You are a math agent.\n\n"
         "INSTRUCTIONS:\n"
-        "- Assist ONLY with web searching tasks\n"
+        "- Assist ONLY with math-related tasks\n"
         "- After you're done with your tasks, respond to the supervisor directly\n"
         "- Respond ONLY with the results of your work, do NOT include ANY other text."
     ),
-    name="websearch_agent",
+    name="math_agent",
 )
 
 
 
 
 SQL_agent = create_react_agent(
-    model=llm,
+    model="openai:gpt-4.1",
     tools=[add, multiply, divide],
     prompt=(
         "You are a math agent.\n\n"

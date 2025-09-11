@@ -45,14 +45,7 @@ from toolings import get_current_weather, validate_user, taviliy_web_search_tool
 
 load_dotenv()  # .env 파일의 환경변수를 불러옵니다
 os.environ.get('TAVILY_API_KEY')
-os.environ.get('SMITHERY_API_KEY')
 
-
-# getpass.getpass('SMITHERY_API_KEY')
-# def _set_env(var: str):
-#     if not os.environ.get(var):
-#         os.environ[var] = getpass.getpass(f"{var}: ")
-# _set_env("ANTHROPIC_API_KEY")
 
 
 
@@ -133,6 +126,12 @@ prompt = ChatPromptTemplate.from_messages(
 
 ## 툴 호출 에이전트 생성
 agent = create_tool_calling_agent(llm, tools, prompt)
+
+## AgentExecutor 생성
+agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True) ## verbose=True로 설정하면 실행 과정확인 가능
+
+## AgentExecutor 실행
+response_from_agent = agent_executor.invoke({"input": "2025 June 9th, there was a final round of nations league for football. Who won?"})
 
 
 ##db = Chroma.from_documents(documents, OpenAIEmbeddings())

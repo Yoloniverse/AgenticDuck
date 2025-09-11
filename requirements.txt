@@ -8,3 +8,12 @@ duckduckgo-search
 langchain-tavily
 agentevals ##evals for agents in LangSmith?
 langgraph-cli[inmem]
+chromadb
+langchain-chroma
+pypdf ## pdf loading in langchain
+langchain-text-splitters
+langchain-mcp-adapters
+mcp[cli]
+smithery
+transformers
+sentence-transformers

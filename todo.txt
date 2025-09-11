@@ -1,0 +1,9 @@
+
+
+
+
+정교한 프롬프트 작성하기 
+pre-built LangGraph가 아닌, low level부터 LangGraph 직접 빌딩
+Reranker 탑재 (진행중)
+우리가 툴 만들기
+우리가 만든 틀 mcp로 사용
