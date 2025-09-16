@@ -1,4 +1,4 @@
-
+import time
 import streamlit as st
 import uuid
 import os
@@ -82,11 +82,11 @@ if "chat_history" not in st.session_state:
 if "thread_id" not in st.session_state:
     st.session_state.thread_id = str(uuid.uuid4())
 
-
+# "qwen3:8b-fp16" / "qwen3:8b"
 @st.cache_resource
 def initialize_graph():
     logger.info("채팅 초기화")
-    llm = ChatOllama(model="qwen3:8b", base_url="http://127.0.0.1:11434")
+    llm = ChatOllama(model="qwen3:8b-fp16", base_url="http://127.0.0.1:11434")
 
     # 메시지를 최대 3세트(6개)로 제한하는 함수
     def add_messages_with_limit(left: list, right: list, max_messages: int = 6) -> list:
@@ -364,107 +364,135 @@ def initialize_graph():
 
 
         def get_schema(self, state: AppState) -> AppState:
-            logger.info(' == [get_schema] node init == ')
-            try:
-                db_structure= """"""
-                # 스키마 순회
-                for schema_name in self.inspector.get_schema_names():
-                    if schema_name == self.db_name:
-                        for idx, table_name in enumerate(self.inspector.get_table_names(schema=schema_name)):
-                            # 컬럼 이름과 타입 수집
-                            columns = self.inspector.get_columns(table_name, schema=schema_name)
-                            column_list = [
-                                f"{col['name']}"
-                                for col in columns
-                            ]
-                            db_structure += f'\n[DB 스키마]\n{idx}.table_name: {table_name}\n{idx}.columns: {column_list}'
-                return {
-                    "sql_db_schema": db_structure
-                }
-            except Exception as e:
-                logger.info(traceback.format_exc())
-                return {
-                "sql_error_node": "get_schema",
-                "sql_error": e
-                }
+                logger.info(' == [get_schema] node init == ')
+                get_schema_result = None
+                max_retries = 3
+                retry_delay = 1
+                for attempt in range(max_retries):
+                    try:
+                        db_structure= """"""
+                        schema_found = False
+                        # 스키마 순회
+                        for schema_name in self.inspector.get_schema_names():
+                            if schema_name == self.db_name:
+                                schema_found = True
+                                logger.info(f'스키마 "{schema_name}" 발견됨')
+                                tables = self.inspector.get_table_names(schema=schema_name)
+                                for idx, table_name in enumerate(tables):
+                                    # 컬럼 이름과 타입 수집
+                                    columns = self.inspector.get_columns(table_name, schema=schema_name)
+                                    column_list = [f"{col['name']}" for col in columns]
+                                    db_structure += f'\n[DB 스키마]\n{idx}.table_name: {table_name}\n{idx}.columns: {column_list}'
+                                break
+                        if not schema_found:
+                            raise Exception(f'스키마 "{self.db_name}"를 찾을 수 없습니다')
+                        logger.info('DB 스키마 가져오기 성공')
+                        return {
+                            "sql_db_schema": db_structure,
+                            "sql_error_node": None,
+                            "sql_error": None
+                        }
+
+                    except Exception as e:
+                        logger.error(f'DB 스키마 가져오기 실패 (시도 {attempt + 1}/{max_retries}): {str(e)}')
+                        # 마지막 시도가 아니라면 잠시 대기 후 재시도
+                        if attempt < max_retries - 1:
+                            time.sleep(retry_delay)
+                            logger.info(f'{retry_delay}초 후 재시도합니다...')
+                        else:
+                            # 모든 시도 실패
+                            logger.error('모든 재시도 실패. DB 스키마 가져오기를 포기합니다.')
+                            return {
+                                "sql_db_schema": None,
+                                "sql_error_node": "get_schema",
+                                "sql_error": f"get_schema 3회 시도 후 실패: {str(e)}"
+                            }
+                
 
         def sql_gen_node(self, state: AppState) -> Command[Literal["sql_execute_node", "sql_final_answer_gen"]]:
             logger.info(' == [sql_gen_node] node init == ')
-            
-            try:
-                # error 메세지가 있으면 참고해서 생성
-                sql_error = state["sql_error"]
-                sql_error_cnt = state["sql_error_cnt"]
-                print(f"sql_error_cnt: {sql_error_cnt}")
+            if state["sql_db_schema"] != None:
+                try:
+                    # error 메세지가 있으면 참고해서 생성
+                    sql_error = state["sql_error"]
+                    sql_error_cnt = state["sql_error_cnt"]
+                    print(f"sql_error_cnt: {sql_error_cnt}")
 
-                if sql_error == None:
-                    prompt_sql = ChatPromptTemplate.from_messages(
-                    [
-                        ("system", f"""너는 사용자 질문에 대한 답을 얻기 위해 아래 [DB 스키마]구조의 데이터베이스에서 필요한 데이터를 얻기위한 SQL 문을 만드는 역할이야. 
-                                    가장 답변을 잘 이끌어 낼 수있는 SQL 조건이 무엇일지 step by step으로 충분히 생각해. 절대 다른 문장을 붙이지 말고, SQL문으로만 답변해.
-                                    [중요 원칙]
-                                    - 무조건 [DB 스키마]에 존재하는 컬럼만 사용해야 함
-                                    - [DB 스키마]에 없는 정보에 대한 질문을 한 경우, 그와 가장 유사한 데이터를 얻을 수 있는 SQL을 생성해.
-                                    - 절대 다른 문장을 붙이지 말고, SQL문으로만 답변해야 함
-                                    - 여러가지 후보를 생각해보고, 그 중 사용자의 질문에 가장 잘 맞는 문장을 선택해
+                    if sql_error == None:
+                        prompt_sql = ChatPromptTemplate.from_messages(
+                        [
+                            ("system", f"""너는 사용자 질문에 대한 답을 얻기 위해 아래 [DB 스키마]구조의 데이터베이스에서 필요한 데이터를 얻기위한 SQL 문을 만드는 역할이야. 
+                                        가장 답변을 잘 이끌어 낼 수있는 SQL 조건이 무엇일지 step by step으로 충분히 생각해. 절대 다른 문장을 붙이지 말고, SQL문으로만 답변해.
+                                        [중요 원칙]
+                                        - 무조건 [DB 스키마]에 존재하는 컬럼만 사용해야 함
+                                        - [DB 스키마]에 없는 정보에 대한 질문을 한 경우, 그와 가장 유사한 데이터를 얻을 수 있는 SQL을 생성해.
+                                        - 절대 다른 문장을 붙이지 말고, SQL문으로만 답변해야 함
+                                        - 여러가지 후보를 생각해보고, 그 중 사용자의 질문에 가장 잘 맞는 문장을 선택해
 
-                                    [DB 스키마]
-                                    {state['sql_db_schema']}"""),
-                        ("human", "{user_question}"),
-                    ])
-                    sql_chain = prompt_sql | llm.with_config({'temperature': 0, 'timeout': 10})
-                    output = sql_chain.invoke({"user_question": state['messages'][-1].content})
-                    return Command(
-                        goto="sql_execute_node",
-                        update={
-                            "sql_draft": output.content.split('</think>\n\n')[-1]
-                        }
-                    )
+                                        [DB 스키마]
+                                        {state['sql_db_schema']}"""),
+                            ("human", "{user_question}"),
+                        ])
+                        sql_chain = prompt_sql | llm.with_config({'temperature': 0, 'timeout': 10})
+                        output = sql_chain.invoke({"user_question": state['messages'][-1].content})
+                        return Command(
+                            goto="sql_execute_node",
+                            update={
+                                "sql_draft": output.content.split('</think>\n\n')[-1]
+                            }
+                        )
+                    # 에러 발생하여 최대 3번 다시 시도
+                    elif sql_error != None and sql_error_cnt <= self.max_gen_sql:
+                        print(f"sql_draft: {state['sql_draft']}")
+                        prompt_sql = ChatPromptTemplate.from_messages(
+                        [
+                            ("system", f"""너는 사용자 질문에 대한 답을 얻기 위해 아래 [DB 스키마]구조의 데이터베이스에서 필요한 데이터를 얻기위한 SQL 문을 만드는 역할이야. 
+                                        너는 방금 잘못된 SQL을 만들어서 에러가 발생했어. 아래 사항들 참고해서 올바른 SQL문을 다시 만들어.
+                                        절대 다른 문장을 붙이지 말고, SQL문으로만 답변해.
+                                        
+                                        [중요한 제약사항]
+                                        - 사용자 질문: {state['messages'][-1].content}
+                                        - 이전에 실패한 SQL: {state['sql_draft']}
+                                        - 발생한 에러: {state['sql_error']}
+                                        - 이번은 {sql_error_cnt}번째 시도입니다.
+                                        - 절대 이전에 실패한 SQL과 같은 구조를 반복하지 말고, 완전히 다른 방식으로 접근해.
+                                        - SQL문으로만 답변해.
 
-                # 에러 발생하여 최대 3번 다시 시도
-                elif sql_error != None and sql_error_cnt <= self.max_gen_sql:
-                    print(f"sql_draft: {state['sql_draft']}")
-                    prompt_sql = ChatPromptTemplate.from_messages(
-                    [
-                        ("system", f"""너는 사용자 질문에 대한 답을 얻기 위해 아래 [DB 스키마]구조의 데이터베이스에서 필요한 데이터를 얻기위한 SQL 문을 만드는 역할이야. 
-                                    너는 방금 잘못된 SQL을 만들어서 에러가 발생했어. 아래 사항들 참고해서 올바른 SQL문을 다시 만들어.
-                                    절대 다른 문장을 붙이지 말고, SQL문으로만 답변해.
-                                    
-                                    [중요한 제약사항]
-                                    - 사용자 질문: {state['messages'][-1].content}
-                                    - 이전에 실패한 SQL: {state['sql_draft']}
-                                    - 발생한 에러: {state['sql_error']}
-                                    - 이번은 {sql_error_cnt}번째 시도입니다.
-                                    - 절대 이전에 실패한 SQL과 같은 구조를 반복하지 말고, 완전히 다른 방식으로 접근해.
-                                    - SQL문으로만 답변해.
+                                        [DB 스키마]
+                                        {state['sql_db_schema']}"""),
+                            ("human", "{user_question}"),
+                        ])
+                        sql_chain = prompt_sql | llm.with_config({'temperature': 0.2 * sql_error_cnt, "timeout": 10})
+                        output = sql_chain.invoke({"user_question": state['messages'][-1].content})
+                        return Command(
+                            goto="sql_execute_node",
+                            update={
+                                "sql_draft": output.content.split('</think>\n\n')[-1]
+                            }
+                        )
+                    else:
+                        return Command(
+                            goto="sql_final_answer_gen",
+                            update={
+                                "sql_draft": "none",
+                                "sql_result": "결과가 없습니다."
+                            }
+                        )
 
-                                    [DB 스키마]
-                                    {state['sql_db_schema']}"""),
-                        ("human", "{user_question}"),
-                    ])
-                    sql_chain = prompt_sql | llm.with_config({'temperature': 0.2 * sql_error_cnt, "timeout": 10})
-                    output = sql_chain.invoke({"user_question": state['messages'][-1].content})
-                    return Command(
-                        goto="sql_execute_node",
-                        update={
-                            "sql_draft": output.content.split('</think>\n\n')[-1]
-                        }
-                    )
-                else:
-                    return Command(
-                        goto="sql_final_answer_gen",
-                        update={
-                            "sql_draft": "none",
-                            "sql_result": "결과가 없습니다."
-                        }
-                    )
-
-            except Exception as e:
-                logger.info(traceback.format_exc())
-                return {
-                    "sql_error_node": "sql_gen_node",
-                    "sql_error": e
-                }
+                except Exception as e:
+                    logger.info(traceback.format_exc())
+                    return {
+                        "sql_error_node": "sql_gen_node",
+                        "sql_error": e
+                    }
+            else:
+                return Command(
+                            goto="sql_final_answer_gen",
+                            update={
+                                "sql_draft": "none",
+                                "sql_result": "현재 연결이 불안정하여 데이터를 조회할 수 없습니다. 잠시 뒤에 다시 질문하라고 안내하세요."
+                            }
+                        )
 
         def sql_execute_node(self, state: AppState) -> Command[Literal["sql_gen_node", "sql_final_answer_gen"]]:
             logger.info(' == [sql_execute_node] node init == ')
@@ -684,6 +712,15 @@ def initialize_graph():
     store = InMemoryStore()
     #compile
     graph = builder.compile(checkpointer=checkpointer)
+
+    # # visualization
+    # from IPython.display import Image
+    # # PNG 바이트 생성
+    # png_bytes = graph.get_graph().draw_mermaid_png()
+    # # 파일로 저장
+    # with open("graph.png", "wb") as f:
+    #     f.write(png_bytes)
+
     return graph
 
 
@@ -707,7 +744,6 @@ if "execution_count" not in st.session_state:
 # 사용자 입력
 if prompt := st.chat_input("궁금한 것을 물어보세요!"):
     #logger.info(f"사용자 입력 : {prompt}")
-    import time
     timestamp = time.time()
     st.session_state.execution_count += 1
     logger.info(f"[세션ID: {st.session_state.thread_id}] - [{st.session_state.execution_count}번째 실행] 실행 시점: {timestamp} - 사용자 입력: {prompt}")
