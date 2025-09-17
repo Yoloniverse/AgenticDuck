@@ -10,3 +10,5 @@ agentevals ##evals for agents in LangSmith?
 langgraph-cli[inmem]
 langmem
 chromadb
+psycopg[binary,pool]
+langgraph-checkpoint-postgres ##for checkpointer with postgres
