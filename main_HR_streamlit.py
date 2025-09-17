@@ -4,6 +4,7 @@ import uuid
 import os
 import sys
 import traceback
+from dotenv import load_dotenv
 ## Langchain libraries
 #from langchain.llms import Ollama
 from langchain.agents import tool, AgentExecutor, create_tool_calling_agent
@@ -43,6 +44,7 @@ from langchain_community.vectorstores import Chroma
 # tools
 sys.path.append("/home/sdt/Workspace/dykim/Langraph/AgenticDuck")
 from toolings import taviliy_web_search_tool 
+load_dotenv()
 
 ######################################################################
 #                             Save Log                               #
@@ -86,7 +88,7 @@ if "thread_id" not in st.session_state:
 @st.cache_resource
 def initialize_graph():
     logger.info("채팅 초기화")
-    llm = ChatOllama(model="qwen3:8b-fp16", base_url="http://127.0.0.1:11434")
+    llm = ChatOllama(model="qwen3:8b", base_url="http://127.0.0.1:11434")
 
     # 메시지를 최대 3세트(6개)로 제한하는 함수
     def add_messages_with_limit(left: list, right: list, max_messages: int = 6) -> list:
@@ -136,7 +138,7 @@ def initialize_graph():
 
     class RouteOut(BaseModel):
         route: Literal["policy", "employee", "general"]  # 결재규정 / 직원정보 / 불명확
-        confidence: float = Field(ge=0, le=1)
+        #confidence: float = Field(ge=0, le=1)
 
     class HallucinationState(TypedDict):
         result: bool
@@ -164,6 +166,7 @@ def initialize_graph():
                                 3. 보안/정책상 제공 불가한 요청: 회사의 보안 규정, 미공개 사업 전략, 계약 내용, 법적 분쟁 자료. 공개가 금지된 기밀문서나 내부 문건 요청
                                 4. 기타: 외부 공개가 허용되지 않은 내부 시스템 데이터 및 로그.
                             """),
+            MessagesPlaceholder("messages"),
             ("human", "{user_question}"),
         ]
     )
@@ -176,7 +179,8 @@ def initialize_graph():
         logger.info(' == [router_node] node init == ')
         
         output = router_chain.invoke({
-            "user_question": state['messages'][-1].content
+            "user_question": state['messages'][-1].content,
+            "messages": state["messages"]
             })
         # 분기
         #path = output.route if output.confidence >= 0.6 else "general"
@@ -233,7 +237,6 @@ def initialize_graph():
     
     def general(state: AppState) -> Command[Literal["query_rewrite", END]]:
         logger.info(' == [general] node init == ')
-        #output = agent_executor.invoke({"user_question": "오늘 한국은 며칠이야?", "messages": ["messages"]})
         output = agent_executor.invoke({"user_question": state['query'], "messages": state["messages"]})
         tools_used = []
         search_contents = []
@@ -352,10 +355,10 @@ def initialize_graph():
     class SQLManager:
         def __init__(self):
             ## db 연결
-            self.db_user = "admin"
-            self.db_password = "sdt251327"
-            self.db_host = "127.0.0.1"
-            self.db_name = "langgraph" 
+            self.db_user = os.getenv("DB_USER")
+            self.db_password = os.getenv("DB_PASSWORD")
+            self.db_host = os.getenv("DB_HOST")
+            self.db_name = os.getenv("DB_NAME")
             self.connection_string = f"mysql+pymysql://{self.db_user}:{self.db_password}@{self.db_host}/{self.db_name}"
             self.engine = create_engine(self.connection_string)
             self.connection = self.engine.connect()
