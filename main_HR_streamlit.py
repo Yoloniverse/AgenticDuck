@@ -1,9 +1,10 @@
-
+import time
 import streamlit as st
 import uuid
 import os
 import sys
 import traceback
+from dotenv import load_dotenv
 ## Langchain libraries
 #from langchain.llms import Ollama
 from langchain.agents import tool, AgentExecutor, create_tool_calling_agent
@@ -43,6 +44,7 @@ from langchain_community.vectorstores import Chroma
 # tools
 sys.path.append("/home/sdt/Workspace/dykim/Langraph/AgenticDuck")
 from toolings import taviliy_web_search_tool 
+load_dotenv()
 
 ######################################################################
 #                             Save Log                               #
@@ -82,11 +84,11 @@ if "chat_history" not in st.session_state:
 if "thread_id" not in st.session_state:
     st.session_state.thread_id = str(uuid.uuid4())
 
-
+# "qwen3:8b-fp16" / "qwen3:8b"
 @st.cache_resource
 def initialize_graph():
     logger.info("채팅 초기화")
-    llm = ChatOllama(model="qwen3:8b", base_url="http://127.0.0.1:11434", temperature=0.1)
+    llm = ChatOllama(model="qwen3:8b", base_url="http://127.0.0.1:11434")
 
     # 메시지를 최대 3세트(6개)로 제한하는 함수
     def add_messages_with_limit(left: list, right: list, max_messages: int = 6) -> list:
@@ -103,8 +105,11 @@ def initialize_graph():
     class AppState(TypedDict, total=False):
         # 대화(필요하면 계속 누적)
         messages: Annotated[list[dict], lambda left, right: add_messages_with_limit(left, right, max_messages=6)]
+        query: str
         # router_node의 분기 결과
         path_results: str
+        web_results : List[str]
+        query_rewrite: Optional[bool]
         # for RAG
         rag_retrieved_docs: List[str]
         rag_reranked_docs: List[str]
@@ -130,13 +135,17 @@ def initialize_graph():
         # 검토 후 통과한 최종 답변
         final_answer: str # 외부로 반환하는 데이터
 
+
     class RouteOut(BaseModel):
         route: Literal["policy", "employee", "general"]  # 결재규정 / 직원정보 / 불명확
-        confidence: float = Field(ge=0, le=1)
+        #confidence: float = Field(ge=0, le=1)
 
     class HallucinationState(TypedDict):
         result: bool
         reason: str
+    class SearchState(TypedDict):
+        result: bool
+
 
     # 라우터 체인
     # 온도 0으로 결정성 높이기
@@ -157,10 +166,11 @@ def initialize_graph():
                                 3. 보안/정책상 제공 불가한 요청: 회사의 보안 규정, 미공개 사업 전략, 계약 내용, 법적 분쟁 자료. 공개가 금지된 기밀문서나 내부 문건 요청
                                 4. 기타: 외부 공개가 허용되지 않은 내부 시스템 데이터 및 로그.
                             """),
+            MessagesPlaceholder("messages"),
             ("human", "{user_question}"),
         ]
     )
-    router_chain = prompt_router | llm.with_config({'temperature': 0}).with_structured_output(RouteOut)
+    router_chain = prompt_router | llm.with_config({'temperature': 0.1}).with_structured_output(RouteOut)
 
     def router_node(state: AppState) -> Command[Literal["rag_init_node", "get_schema", "general", "security_filter"]]:
         '''
@@ -169,7 +179,8 @@ def initialize_graph():
         logger.info(' == [router_node] node init == ')
         
         output = router_chain.invoke({
-            "user_question": state['messages'][-1].content
+            "user_question": state['messages'][-1].content,
+            "messages": state["messages"]
             })
         # 분기
         #path = output.route if output.confidence >= 0.6 else "general"
@@ -180,6 +191,7 @@ def initialize_graph():
                 goto="rag_init_node",
                 update={
                     "path_results": path,
+                    "query": state['messages'][-1].content
                 }
             )
         elif path == "employee":
@@ -187,6 +199,7 @@ def initialize_graph():
                 goto="get_schema",
                 update={
                     "path_results": path,
+                    "query": state['messages'][-1].content
                 }
             )
         elif path == "general":
@@ -194,6 +207,7 @@ def initialize_graph():
                 goto="general",
                 update={
                     "path_results": path,
+                    "query": state['messages'][-1].content
                 }
             )
         elif path == "security_filter":
@@ -201,6 +215,7 @@ def initialize_graph():
                 goto="general",
                 update={
                     "path_results": path,
+                    "query": state['messages'][-1].content
                 }
             )
 
@@ -217,31 +232,106 @@ def initialize_graph():
             MessagesPlaceholder("messages"),
             ("placeholder", "{agent_scratchpad}"),
         ])
-    agent = create_tool_calling_agent(llm.with_config({'temperature': 0.5}), tools, prompt_gen)
+    agent = create_tool_calling_agent(llm.with_config({'temperature': 0.3}), tools, prompt_gen)
     agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=False, return_intermediate_steps=True) 
     
-    def general(state: AppState) -> AppState:
+    def general(state: AppState) -> Command[Literal["query_rewrite", END]]:
         logger.info(' == [general] node init == ')
-        #gen_chain = prompt_gen | llm.with_config({'temperature': 0.5})
-        output = agent_executor.invoke({"user_question": state['messages'][-1].content, "messages": state["messages"]})
+        output = agent_executor.invoke({"user_question": state['query'], "messages": state["messages"]})
         tools_used = []
+        search_contents = []
         if 'intermediate_steps' in output and output['intermediate_steps']:
             tool_calls_made = True
             for step in output['intermediate_steps']:
-                if isinstance(step, tuple) and len(step) >= 1:
-                    action = step[0]
+                if len(step) >= 2:
+                    action, result = step[0], step[1]
                     if hasattr(action, 'tool'):
                         tools_used.append(action.tool)
+                    if isinstance(result, dict) and 'results' in result:
+                        for search_result in result['results']:
+                            if 'content' in search_result and search_result['content']:
+                                search_contents.append(search_result['content'].replace("{","(").replace("}",")"))
         else:
             tool_calls_made = False
 
         logger.info(f"tool_calls_made: {tool_calls_made}, tools_used: {tools_used}")
+
+        # 웹 검색 tool을 사용한 경우 검색 결과 검증
+        if tool_calls_made and  "taviliy_web_search_tool" in tools_used:
+            prompt_search_check = ChatPromptTemplate.from_messages(
+            [
+                ("system", f"""너는 사용자 질문과 [웹 검색 결과]를 비교하여 검색 결과가 사용자 질문에 대한 답변을 생성하는데 적합한지 판단하는 역할이야.
+                            [조건]
+                            - 다른 문장 붙이지 말고 True 또는 False로만 대답해.
+                            - 사용자 질문에 대한 답변으로 적합함 = True
+                            - 사용자 질문에 대한 답변으로 부족합 = False 
+                            [웹 검색 결과]
+                            {search_contents[0]}
+                            {search_contents[1]}
+                            {search_contents[2]}
+                            """),
+                ("human", "사용자 질문: {user_question}, 웹에서 검색된 결과가 사용자 질문에대한 답변으로 적합한지 판단해."),
+            ])
+            # .with_structured_output(SearchState)를 사용하면 적합하지 않은 결과를 적합하다고 판단, 사용하지않으면 정확하게 잘 판단함
+            check_chain = prompt_search_check | llm.with_config({'temperature': 0.2})
+            output_check = check_chain.invoke({"user_question": state['messages'][-1].content})
+            result = output_check.content.split('</think>\n\n')[-1]
+
+            # 웹 검색 결과가 답변하기 충분하여 종료
+            if result == 'True':
+                return Command(
+                            goto=END,
+                            update={
+                            "messages": AIMessage(content=output['output'].split('</think>\n\n')[-1]),
+                            "final_answer": output['output'].split('</think>\n\n')[-1],
+                            "tools_used": list(set(tools_used)),
+                            "tool_calls_made": tool_calls_made,
+                            "query_rewrite": False,
+                            }
+                    )
+            # 웹 검색 결과가 적합하지 않아 쿼리를 재작성
+            else:
+                return Command(
+                            goto="query_rewrite",
+                            update={
+                                "query_rewrite": True,
+                                "web_results": search_contents
+                            }
+                        )
+        else:
+            return Command(
+                            goto=END,
+                            update={
+                            "messages": AIMessage(content=output['output'].split('</think>\n\n')[-1]),
+                            "final_answer": output['output'].split('</think>\n\n')[-1],
+                            "tools_used": list(set(tools_used)),
+                            "tool_calls_made": tool_calls_made
+                            }
+                    )
+
+    def query_rewrite(state: AppState) -> AppState:
+        logger.info(' == [query_rewrite] node init == ')
+        web_results = state['web_results']
+        prompt_rewrite = ChatPromptTemplate.from_messages(
+        [
+            ("system", f"""You a question re-writer that converts an input question to a better version that is optimized for web searches.
+                        [조건]
+                         - Look at the input and try to reason about the underlying semantic intent / meaning.
+                         - 간결하게 답변하고 한국어로 답변해.
+                         - [이전 검색 결과]를 참고해서, 이런 결과가 안나올 수 있는 질문으로 생성해.
+                        [이전 검색 결과]
+                         - {web_results[0]}
+                         - {web_results[1]}
+                         - {web_results[2]}
+                        """),
+            ("human", "원래 사용자 질문: {user_question}, 웹 검색을 위해 개선된 질문을 생성해."),
+        ])
+        rewrite_chain = prompt_rewrite | llm.with_config({'temperature': 0.5})
+        output = rewrite_chain.invoke({"user_question": state['messages'][-1].content})
         return {
-            "messages": AIMessage(content=output['output'].split('</think>\n\n')[-1]),
-            "final_answer": output['output'].split('</think>\n\n')[-1],
-            "tools_used": list(set(tools_used)),
-            "tool_calls_made": tool_calls_made
-            }
+                "query": output.content.split('</think>\n\n')[-1],
+                }
+                    
 
     def security_filter(state: AppState) -> AppState:
         logger.info(' == [security_filter] node init == ')
@@ -265,10 +355,10 @@ def initialize_graph():
     class SQLManager:
         def __init__(self):
             ## db 연결
-            self.db_user = "admin"
-            self.db_password = "sdt251327"
-            self.db_host = "127.0.0.1"
-            self.db_name = "langgraph" 
+            self.db_user = os.getenv("DB_USER")
+            self.db_password = os.getenv("DB_PASSWORD")
+            self.db_host = os.getenv("DB_HOST")
+            self.db_name = os.getenv("DB_NAME")
             self.connection_string = f"mysql+pymysql://{self.db_user}:{self.db_password}@{self.db_host}/{self.db_name}"
             self.engine = create_engine(self.connection_string)
             self.connection = self.engine.connect()
@@ -277,107 +367,135 @@ def initialize_graph():
 
 
         def get_schema(self, state: AppState) -> AppState:
-            logger.info(' == [get_schema] node init == ')
-            try:
-                db_structure= """"""
-                # 스키마 순회
-                for schema_name in self.inspector.get_schema_names():
-                    if schema_name == self.db_name:
-                        for idx, table_name in enumerate(self.inspector.get_table_names(schema=schema_name)):
-                            # 컬럼 이름과 타입 수집
-                            columns = self.inspector.get_columns(table_name, schema=schema_name)
-                            column_list = [
-                                f"{col['name']}"
-                                for col in columns
-                            ]
-                            db_structure += f'\n[DB 스키마]\n{idx}.table_name: {table_name}\n{idx}.columns: {column_list}'
-                return {
-                    "sql_db_schema": db_structure
-                }
-            except Exception as e:
-                logger.info(traceback.format_exc())
-                return {
-                "sql_error_node": "get_schema",
-                "sql_error": e
-                }
+                logger.info(' == [get_schema] node init == ')
+                get_schema_result = None
+                max_retries = 3
+                retry_delay = 1
+                for attempt in range(max_retries):
+                    try:
+                        db_structure= """"""
+                        schema_found = False
+                        # 스키마 순회
+                        for schema_name in self.inspector.get_schema_names():
+                            if schema_name == self.db_name:
+                                schema_found = True
+                                logger.info(f'스키마 "{schema_name}" 발견됨')
+                                tables = self.inspector.get_table_names(schema=schema_name)
+                                for idx, table_name in enumerate(tables):
+                                    # 컬럼 이름과 타입 수집
+                                    columns = self.inspector.get_columns(table_name, schema=schema_name)
+                                    column_list = [f"{col['name']}" for col in columns]
+                                    db_structure += f'\n[DB 스키마]\n{idx}.table_name: {table_name}\n{idx}.columns: {column_list}'
+                                break
+                        if not schema_found:
+                            raise Exception(f'스키마 "{self.db_name}"를 찾을 수 없습니다')
+                        logger.info('DB 스키마 가져오기 성공')
+                        return {
+                            "sql_db_schema": db_structure,
+                            "sql_error_node": None,
+                            "sql_error": None
+                        }
+
+                    except Exception as e:
+                        logger.error(f'DB 스키마 가져오기 실패 (시도 {attempt + 1}/{max_retries}): {str(e)}')
+                        # 마지막 시도가 아니라면 잠시 대기 후 재시도
+                        if attempt < max_retries - 1:
+                            time.sleep(retry_delay)
+                            logger.info(f'{retry_delay}초 후 재시도합니다...')
+                        else:
+                            # 모든 시도 실패
+                            logger.error('모든 재시도 실패. DB 스키마 가져오기를 포기합니다.')
+                            return {
+                                "sql_db_schema": None,
+                                "sql_error_node": "get_schema",
+                                "sql_error": f"get_schema 3회 시도 후 실패: {str(e)}"
+                            }
+                
 
         def sql_gen_node(self, state: AppState) -> Command[Literal["sql_execute_node", "sql_final_answer_gen"]]:
             logger.info(' == [sql_gen_node] node init == ')
-            
-            try:
-                # error 메세지가 있으면 참고해서 생성
-                sql_error = state["sql_error"]
-                sql_error_cnt = state["sql_error_cnt"]
-                print(f"sql_error_cnt: {sql_error_cnt}")
+            if state["sql_db_schema"] != None:
+                try:
+                    # error 메세지가 있으면 참고해서 생성
+                    sql_error = state["sql_error"]
+                    sql_error_cnt = state["sql_error_cnt"]
+                    print(f"sql_error_cnt: {sql_error_cnt}")
 
-                if sql_error == None:
-                    prompt_sql = ChatPromptTemplate.from_messages(
-                    [
-                        ("system", f"""너는 사용자 질문에 대한 답을 얻기 위해 아래 [DB 스키마]구조의 데이터베이스에서 필요한 데이터를 얻기위한 SQL 문을 만드는 역할이야. 
-                                    가장 답변을 잘 이끌어 낼 수있는 SQL 조건이 무엇일지 step by step으로 충분히 생각해. 절대 다른 문장을 붙이지 말고, SQL문으로만 답변해.
-                                    [중요 원칙]
-                                    - 무조건 [DB 스키마]에 존재하는 컬럼만 사용해야 함
-                                    - [DB 스키마]에 없는 정보에 대한 질문을 한 경우, 그와 가장 유사한 데이터를 얻을 수 있는 SQL을 생성해.
-                                    - 절대 다른 문장을 붙이지 말고, SQL문으로만 답변해야 함
-                                    - 여러가지 후보를 생각해보고, 그 중 사용자의 질문에 가장 잘 맞는 문장을 선택해
+                    if sql_error == None:
+                        prompt_sql = ChatPromptTemplate.from_messages(
+                        [
+                            ("system", f"""너는 사용자 질문에 대한 답을 얻기 위해 아래 [DB 스키마]구조의 데이터베이스에서 필요한 데이터를 얻기위한 SQL 문을 만드는 역할이야. 
+                                        가장 답변을 잘 이끌어 낼 수있는 SQL 조건이 무엇일지 step by step으로 충분히 생각해. 절대 다른 문장을 붙이지 말고, SQL문으로만 답변해.
+                                        [중요 원칙]
+                                        - 무조건 [DB 스키마]에 존재하는 컬럼만 사용해야 함
+                                        - [DB 스키마]에 없는 정보에 대한 질문을 한 경우, 그와 가장 유사한 데이터를 얻을 수 있는 SQL을 생성해.
+                                        - 절대 다른 문장을 붙이지 말고, SQL문으로만 답변해야 함
+                                        - 여러가지 후보를 생각해보고, 그 중 사용자의 질문에 가장 잘 맞는 문장을 선택해
 
-                                    [DB 스키마]
-                                    {state['sql_db_schema']}"""),
-                        ("human", "{user_question}"),
-                    ])
-                    sql_chain = prompt_sql | llm.with_config({'temperature': 0, 'timeout': 10})
-                    output = sql_chain.invoke({"user_question": state['messages'][-1].content})
-                    return Command(
-                        goto="sql_execute_node",
-                        update={
-                            "sql_draft": output.content.split('</think>\n\n')[-1]
-                        }
-                    )
+                                        [DB 스키마]
+                                        {state['sql_db_schema']}"""),
+                            ("human", "{user_question}"),
+                        ])
+                        sql_chain = prompt_sql | llm.with_config({'temperature': 0, 'timeout': 10})
+                        output = sql_chain.invoke({"user_question": state['messages'][-1].content})
+                        return Command(
+                            goto="sql_execute_node",
+                            update={
+                                "sql_draft": output.content.split('</think>\n\n')[-1]
+                            }
+                        )
+                    # 에러 발생하여 최대 3번 다시 시도
+                    elif sql_error != None and sql_error_cnt <= self.max_gen_sql:
+                        print(f"sql_draft: {state['sql_draft']}")
+                        prompt_sql = ChatPromptTemplate.from_messages(
+                        [
+                            ("system", f"""너는 사용자 질문에 대한 답을 얻기 위해 아래 [DB 스키마]구조의 데이터베이스에서 필요한 데이터를 얻기위한 SQL 문을 만드는 역할이야. 
+                                        너는 방금 잘못된 SQL을 만들어서 에러가 발생했어. 아래 사항들 참고해서 올바른 SQL문을 다시 만들어.
+                                        절대 다른 문장을 붙이지 말고, SQL문으로만 답변해.
+                                        
+                                        [중요한 제약사항]
+                                        - 사용자 질문: {state['messages'][-1].content}
+                                        - 이전에 실패한 SQL: {state['sql_draft']}
+                                        - 발생한 에러: {state['sql_error']}
+                                        - 이번은 {sql_error_cnt}번째 시도입니다.
+                                        - 절대 이전에 실패한 SQL과 같은 구조를 반복하지 말고, 완전히 다른 방식으로 접근해.
+                                        - SQL문으로만 답변해.
 
-                # 에러 발생하여 최대 3번 다시 시도
-                elif sql_error != None and sql_error_cnt <= self.max_gen_sql:
-                    print(f"sql_draft: {state['sql_draft']}")
-                    prompt_sql = ChatPromptTemplate.from_messages(
-                    [
-                        ("system", f"""너는 사용자 질문에 대한 답을 얻기 위해 아래 [DB 스키마]구조의 데이터베이스에서 필요한 데이터를 얻기위한 SQL 문을 만드는 역할이야. 
-                                    너는 방금 잘못된 SQL을 만들어서 에러가 발생했어. 아래 사항들 참고해서 올바른 SQL문을 다시 만들어.
-                                    절대 다른 문장을 붙이지 말고, SQL문으로만 답변해.
-                                    
-                                    [중요한 제약사항]
-                                    - 사용자 질문: {state['messages'][-1].content}
-                                    - 이전에 실패한 SQL: {state['sql_draft']}
-                                    - 발생한 에러: {state['sql_error']}
-                                    - 이번은 {sql_error_cnt}번째 시도입니다.
-                                    - 절대 이전에 실패한 SQL과 같은 구조를 반복하지 말고, 완전히 다른 방식으로 접근해.
-                                    - SQL문으로만 답변해.
+                                        [DB 스키마]
+                                        {state['sql_db_schema']}"""),
+                            ("human", "{user_question}"),
+                        ])
+                        sql_chain = prompt_sql | llm.with_config({'temperature': 0.2 * sql_error_cnt, "timeout": 10})
+                        output = sql_chain.invoke({"user_question": state['messages'][-1].content})
+                        return Command(
+                            goto="sql_execute_node",
+                            update={
+                                "sql_draft": output.content.split('</think>\n\n')[-1]
+                            }
+                        )
+                    else:
+                        return Command(
+                            goto="sql_final_answer_gen",
+                            update={
+                                "sql_draft": "none",
+                                "sql_result": "결과가 없습니다."
+                            }
+                        )
 
-                                    [DB 스키마]
-                                    {state['sql_db_schema']}"""),
-                        ("human", "{user_question}"),
-                    ])
-                    sql_chain = prompt_sql | llm.with_config({'temperature': 0.2 * sql_error_cnt, "timeout": 10})
-                    output = sql_chain.invoke({"user_question": state['messages'][-1].content})
-                    return Command(
-                        goto="sql_execute_node",
-                        update={
-                            "sql_draft": output.content.split('</think>\n\n')[-1]
-                        }
-                    )
-                else:
-                    return Command(
-                        goto="sql_final_answer_gen",
-                        update={
-                            "sql_draft": "none",
-                            "sql_result": "결과가 없습니다."
-                        }
-                    )
-
-            except Exception as e:
-                logger.info(traceback.format_exc())
-                return {
-                    "sql_error_node": "sql_gen_node",
-                    "sql_error": e
-                }
+                except Exception as e:
+                    logger.info(traceback.format_exc())
+                    return {
+                        "sql_error_node": "sql_gen_node",
+                        "sql_error": e
+                    }
+            else:
+                return Command(
+                            goto="sql_final_answer_gen",
+                            update={
+                                "sql_draft": "none",
+                                "sql_result": "현재 연결이 불안정하여 데이터를 조회할 수 없습니다. 잠시 뒤에 다시 질문하라고 안내하세요."
+                            }
+                        )
 
         def sql_execute_node(self, state: AppState) -> Command[Literal["sql_gen_node", "sql_final_answer_gen"]]:
             logger.info(' == [sql_execute_node] node init == ')
@@ -572,6 +690,7 @@ def initialize_graph():
     # node
     builder.add_node("router", router_node)
     builder.add_node("general", general)
+    builder.add_node("query_rewrite", query_rewrite)
     builder.add_node("security_filter", security_filter)
     builder.add_node("get_schema", sql_manager.get_schema)
     builder.add_node("sql_gen_node", sql_manager.sql_gen_node)
@@ -586,7 +705,7 @@ def initialize_graph():
     builder.add_edge(START, "router")
     builder.add_edge("get_schema", "sql_gen_node")
     builder.add_edge("sql_final_answer_gen", END)
-    builder.add_edge("general", END)
+    builder.add_edge("query_rewrite", "general")
     builder.add_edge("rag_execute_node", "rag_final_answer_gen")
     builder.add_edge("rag_final_answer_gen", "hallucination_check")
     builder.add_edge("hallucination_check", END)
@@ -596,6 +715,15 @@ def initialize_graph():
     store = InMemoryStore()
     #compile
     graph = builder.compile(checkpointer=checkpointer)
+
+    # # visualization
+    # from IPython.display import Image
+    # # PNG 바이트 생성
+    # png_bytes = graph.get_graph().draw_mermaid_png()
+    # # 파일로 저장
+    # with open("graph.png", "wb") as f:
+    #     f.write(png_bytes)
+
     return graph
 
 
@@ -619,7 +747,6 @@ if "execution_count" not in st.session_state:
 # 사용자 입력
 if prompt := st.chat_input("궁금한 것을 물어보세요!"):
     #logger.info(f"사용자 입력 : {prompt}")
-    import time
     timestamp = time.time()
     st.session_state.execution_count += 1
     logger.info(f"[세션ID: {st.session_state.thread_id}] - [{st.session_state.execution_count}번째 실행] 실행 시점: {timestamp} - 사용자 입력: {prompt}")
