@@ -5,7 +5,7 @@ Thread, 유저별 히스토리 트래킹 구현 (store interface)
 체크포인트-포스트그레스 연동: langgraph-checkpoint-postgres: An advanced checkpointer that uses Postgres database (PostgresSaver / AsyncPostgresSaver), used in LangGraph Platform. Ideal for using in production. Needs to be installed separately.
 MCP를 사용한 기능 추가
 ChainOfThoughts 구현
-query를 decompose 하는 방법 리서치 
+query를 decompose 하는 방법 리서치  (Planner and Router)
 디테일 개발
 computing efficient 코드 업데이트
 aync로 개발 
