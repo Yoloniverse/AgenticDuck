@@ -3,6 +3,7 @@ import streamlit as st
 import uuid
 import os
 import sys
+import torch
 import traceback
 from dotenv import load_dotenv
 ## Langchain libraries
@@ -157,10 +158,10 @@ def initialize_graph():
                             - 사내 정보에 대한 질문인데 일반적인 질문이라고 착각하지 않도록 충분히 생각해.
                             - 사용자가 질문을 통해 얻고싶은 정보가 무엇인지를 핵심으로 중요하게 생각해.
                         [조건]
-                            - "policy" = 사내 인사 규정, 근무 규정, 업무 프로세스, 결재/기안 작성 규정, 출장비·경비 처리, 휴가·근태, 보고서 제출, 전결 규정 등 회사 규정이나 제도와 관련된 질문  
-                            - "employee" = 사내 직원 개인의 이름, 연락처, 부서, 직급, 담당 업무 등 인사/조직 정보 관련 질문
-                            - "general" = "policy", "employee" 범주에 해당되지 않고, 사내 문서를 참고하지 않고 답변할 수 있는 일반적인 질문
-                            - "answer_unavailable" = 사용자의 질문이 1~4번에 해당되는 질문
+                            - "policy" = 사내 인사 규정, 근무 규정, 업무 프로세스, 결재/기안 작성 규정, 출장비·경비 처리, 휴가·근태, 보고서 제출, 전결 규정 등 회사 규정이나 제도와 관련된 질문. 
+                            - "employee" = 사내 직원 개인의 이름, 연락처, 부서, 직급, 담당 업무 등 인사/조직 정보 관련 질문.
+                            - "general" = 일반적인 질문으로 사내 문서나 직원 정보에 대한 질문이 아닌 경우.
+                            - "answer_unavailable" = 사용자의 질문이 아래 1~4번에 해당되는 질문.
                                 1. 시스템 내부 정보: 서버 주소, 데이터베이스 접근 정보, API 키, 토큰, 비밀번호 등 시스템 보안과 관련된 정보. 내부 네트워크 구조, 로그, 소스코드, 모델 파라미터, 운영 인프라 세부사항
                                 2. 개인정보 및 민감 데이터: 주민등록번호, 계좌번호, 급여 내역, 인사평가, 채용 심사 결과 등 민감한 개인 신상 정보. 특정 직원의 사적인 생활, 개인 기록, 비공개 건강·재무 정보
                                 3. 보안/정책상 제공 불가한 요청: 회사의 보안 규정, 미공개 사업 전략, 계약 내용, 법적 분쟁 자료. 공개가 금지된 기밀문서나 내부 문건 요청
@@ -309,33 +310,37 @@ def initialize_graph():
                             }
                     )
 
-    def query_rewrite(state: AppState) -> AppState:
-        logger.info(' == [query_rewrite] node init == ')
-        web_results = state['web_results']
-        prompt_rewrite = ChatPromptTemplate.from_messages(
+
+    prompt_rewrite = ChatPromptTemplate.from_messages(
         [
-            ("system", f"""You a question re-writer that converts an input question to a better version that is optimized for web searches.
+            ("system", """You a question re-writer that converts an input question to a better version that is optimized for web searches.
                         [조건]
                          - Look at the input and try to reason about the underlying semantic intent / meaning.
                          - 간결하게 답변하고 한국어로 답변해.
                          - [이전 검색 결과]를 참고해서, 이런 결과가 안나올 수 있는 질문으로 생성해.
                         [이전 검색 결과]
-                         - {web_results[0]}
-                         - {web_results[1]}
-                         - {web_results[2]}
+                         - {web_results_0}
+                         - {web_results_1}
+                         - {web_results_2}
                         """),
             ("human", "원래 사용자 질문: {user_question}, 웹 검색을 위해 개선된 질문을 생성해."),
         ])
-        rewrite_chain = prompt_rewrite | llm.with_config({'temperature': 0.5})
-        output = rewrite_chain.invoke({"user_question": state['messages'][-1].content})
+    rewrite_chain = prompt_rewrite | llm.with_config({'temperature': 0.5})
+    def query_rewrite(state: AppState) -> AppState:
+        logger.info(' == [query_rewrite] node init == ')
+        web_results = state['web_results']
+        
+        output = rewrite_chain.invoke({
+            "user_question": state['messages'][-1].content,
+            "web_results_0": web_results[0],
+            "web_results_1": web_results[1],
+            "web_results_2": web_results[2],
+            })
         return {
                 "query": output.content.split('</think>\n\n')[-1],
                 }
                     
-
-    def security_filter(state: AppState) -> AppState:
-        logger.info(' == [security_filter] node init == ')
-        prompt_security = ChatPromptTemplate.from_messages(
+    prompt_security = ChatPromptTemplate.from_messages(
         [
             ("system", f"""너는 사용자의 질문을 참고하여, 민감 정보 접근으로 인한 답변 불가능을 설명하는 역할이야.
                         [조건]
@@ -344,7 +349,10 @@ def initialize_graph():
                         """),
             ("human", "{user_question}"),
         ])
-        security_chain = prompt_gen | llm.with_config({'temperature': 0.5})
+    security_chain = prompt_gen | llm.with_config({'temperature': 0.5})
+    def security_filter(state: AppState) -> AppState:
+        logger.info(' == [security_filter] node init == ')
+        
         output = security_chain.invoke({"user_question": state['messages'][-1].content})
         return {
             "messages": AIMessage(content=output.content.split('</think>\n\n')[-1]),
@@ -364,6 +372,21 @@ def initialize_graph():
             self.connection = self.engine.connect()
             self.inspector = inspect(self.engine)
             self.max_gen_sql = 2
+            # chain
+            self.prompt_final = ChatPromptTemplate.from_messages(
+            [
+                ("system", """너는 질의응답 챗봇 시스템에서 사용자 질문에 대한 최종 답변을 생성하는 역할이야. 
+                            [조건]
+                             - 아래 [정보]는 사용자의 질문을 기반으로 [SQL문]으로 필요한 정보를 DB에서 조회한 결과야. 정보에 없는 내용을 덧붙이거나 변형하여 환각을 일으키지 마.
+                             - DB 스키마, 테이블 등 내부 정보를 사용자에게 노출하지마.
+                             - 사용자는 내부적으로 어떤 로직에 의해 답변을 생성하는지 알 필요 없어. 일반적인 질의응답의 답변처럼 작성해.'제공된 정보에는~' '제공된 문서에는~' 이런 말투 쓰지마.
+                             - 한국어로 답변해.
+                            [SQL문]\n {sql_draft}
+                            [정보]\n {sql_result}"""),
+                ("human", "{user_question}"),
+                MessagesPlaceholder("messages")
+            ])
+            self.final_chain = self.prompt_final | llm.with_config({'temperature': 0})
 
 
         def get_schema(self, state: AppState) -> AppState:
@@ -431,13 +454,15 @@ def initialize_graph():
                                         - [DB 스키마]에 없는 정보에 대한 질문을 한 경우, 그와 가장 유사한 데이터를 얻을 수 있는 SQL을 생성해.
                                         - 절대 다른 문장을 붙이지 말고, SQL문으로만 답변해야 함
                                         - 여러가지 후보를 생각해보고, 그 중 사용자의 질문에 가장 잘 맞는 문장을 선택해
+                                        - SQL문 문법, 따옴표, 스키마에 맞는 컬럼명 등을 올바르게 입력했는지 다시한번 생각해
 
                                         [DB 스키마]
                                         {state['sql_db_schema']}"""),
+                            MessagesPlaceholder("messages"),
                             ("human", "{user_question}"),
                         ])
                         sql_chain = prompt_sql | llm.with_config({'temperature': 0, 'timeout': 10})
-                        output = sql_chain.invoke({"user_question": state['messages'][-1].content})
+                        output = sql_chain.invoke({"user_question": state['messages'][-1].content, "messages": state["messages"]})
                         return Command(
                             goto="sql_execute_node",
                             update={
@@ -531,25 +556,19 @@ def initialize_graph():
                         }
                     )
 
+        
         def sql_final_answer_gen(self,state: AppState) -> AppState:
             logger.info(' == [sql_execsql_final_answer_gen] node init == ')
 
             sql_result = state['sql_result']
             sql_draft = state['sql_draft']
-            prompt_final = ChatPromptTemplate.from_messages(
-            [
-                ("system", f"""너는 질의응답 챗봇 시스템에서 사용자 질문에 대한 최종 답변을 생성하는 역할이야. 
-                            [조건]
-                             - 아래 [정보]는 사용자의 질문을 기반으로 [SQL문]으로 필요한 정보를 DB에서 조회한 결과야. 정보에 없는 내용을 덧붙이거나 변형하여 환각을 일으키지 마.
-                             - DB 스키마, 테이블 등 내부 정보를 사용자에게 노출하지마.
-                             - 한국어로 답변해.
-                            [SQL문]\n {sql_draft}
-                            [정보]\n {sql_result}"""),
-                ("human", "{user_question}"),
-                MessagesPlaceholder("messages")
-            ])
-            final_chain = prompt_final | llm.with_config({'temperature': 0})
-            output = final_chain.invoke({"user_question": state['messages'][-1].content, "messages": state["messages"]})
+            
+            output = self.final_chain.invoke({
+                "user_question": state['messages'][-1].content, 
+                "messages": state["messages"],
+                "sql_draft": sql_draft,
+                "sql_result": sql_result
+                })
             return {
                 "messages": AIMessage(content=output.content.split('</think>\n\n')[-1]),
                 "final_answer": output.content.split('</think>\n\n')[-1]
@@ -565,6 +584,32 @@ def initialize_graph():
             self.top_k = 3 # 프롬프트에 제공할 문서 갯수
             self.embeddings = None
             self.reranker = None
+            # final answer chain
+            self.prompt_final = ChatPromptTemplate.from_messages(
+            [
+                ("system", """너는 질의응답 챗봇 시스템에서 사용자 질문에 대한 최종 답변을 생성하는 역할이야. 
+                            [조건]
+                             - 아래 [정보]는 사용자의 질문을 기반으로 문서에서 조회한 결과야. 결과에 없는 부분은 모른다고 대답하고, 정보에 없는 내용을 덧붙이거나 변형하여 환각을 일으키지 마. 
+                             - 사용자는 내부적으로 어떤 로직에 의해 답변을 생성하는지 알 필요 없어. 일반적인 질의응답의 답변처럼 작성해. '제공된 정보에는~' '제공된 문서에는~' 이런 말투 쓰지마.
+                             - 한국어로 답변해.
+                            [정보] \n {rag_reranked_docs}"""),
+                ("human", "{user_question}"),
+                MessagesPlaceholder("messages")
+            ])
+            self.final_chain = self.prompt_final | llm.with_config({'temperature': 0})
+            # hallucination chain
+            self.prompt_check = ChatPromptTemplate.from_messages(
+            [
+                ("system", """너는 RAG(Retrieval-Augmented Generation)결과물인 [문서 정보]과 LLM 모델이 생성한 [생성 답변]을 비교하여, [생성 답변]에 [문서 정보]에 없는 내용이 포함되어있는지 hallucination 여부를 판단하는 역할이야.
+                            \n[조건]\n : hallucination 발생 시 True, 없을 시 False를 'result' key에 반환하세요. 그리고 hallucination이 발생했다고 판단한 이유를 'reason' key에 반환하세요.
+                            \n[문서 정보]\n {rag_reranked_docs}
+                            \n[생성 답변]\n {final_answer}
+                            """),
+                ("human", "{user_question}")
+            ])
+            self.hallucination_chain = self.prompt_check | llm.with_config({'temperature': 0}).with_structured_output(HallucinationState)
+
+
 
         def rag_init_node(self, state: AppState) -> Command[Literal["rag_execute_node", END]]:
             logger.info(' == [rag_init_node] node init == ')
@@ -630,45 +675,36 @@ def initialize_graph():
                 "rag_reranked_docs": reranked_docs
             }
 
+        
+
         def rag_final_answer_gen(self, state: AppState) -> AppState:
             logger.info(' == [rag_final_answer_gen] node init == ')
 
             rag_reranked_docs = state['rag_reranked_docs']
 
-            prompt_final = ChatPromptTemplate.from_messages(
-            [
-                ("system", f"""너는 질의응답 챗봇 시스템에서 사용자 질문에 대한 최종 답변을 생성하는 역할이야. 
-                            [조건]
-                             - 아래 [정보]는 사용자의 질문을 기반으로 문서에서 조회한 결과야. 결과에 없는 부분은 모른다고 대답하고, 정보에 없는 내용을 덧붙이거나 변형하여 환각을 일으키지 마. 
-                             - 한국어로 답변해.
-                            [정보] \n {rag_reranked_docs}"""),
-                ("human", "{user_question}"),
-                MessagesPlaceholder("messages")
-            ])
-            final_chain = prompt_final | llm.with_config({'temperature': 0})
-            output = final_chain.invoke({"user_question": state['messages'][-1].content, "messages": state["messages"]})
+            output = self.final_chain.invoke({
+                "user_question": state['messages'][-1].content, 
+                "messages": state["messages"],
+                "rag_reranked_docs": rag_reranked_docs
+                })
             return {
                 "messages": AIMessage(content=output.content.split('</think>\n\n')[-1]),
                 "final_answer": output.content.split('</think>\n\n')[-1]
             }
 
+        
         def hallucination_check(self, state: AppState) -> AppState:
             logger.info(' == [hallucination_check] node init == ')
 
             rag_reranked_docs = state['rag_reranked_docs']
             final_answer = state['final_answer']
 
-            prompt_check = ChatPromptTemplate.from_messages(
-            [
-                ("system", f"""너는 RAG(Retrieval-Augmented Generation)결과물인 [문서 정보]과 LLM 모델이 생성한 [생성 답변]을 비교하여, [생성 답변]에 [문서 정보]에 없는 내용이 포함되어있는지 hallucination 여부를 판단하는 역할이야.
-                            \n[조건]\n : hallucination 발생 시 True, 없을 시 False를 'result' key에 반환하세요. 그리고 hallucination이 발생했다고 판단한 이유를 'reason' key에 반환하세요.
-                            \n[문서 정보]\n {rag_reranked_docs}
-                            \n[생성 답변]\n {final_answer}
-                            """),
-                ("human", "{user_question}")
-            ])
-            final_chain = prompt_check | llm.with_config({'temperature': 0}).with_structured_output(HallucinationState)
-            output = final_chain.invoke({"user_question": state['messages'][-1].content})
+            
+            output = self.hallucination_chain.invoke({
+                "user_question": state['messages'][-1].content,
+                "rag_reranked_docs": rag_reranked_docs,
+                "final_answer": final_answer
+                })
             check_result = output['result']
 
             # hallucination 발생
@@ -797,11 +833,13 @@ if prompt := st.chat_input("궁금한 것을 물어보세요!"):
                 # 응답을 채팅 히스토리에 추가
                 st.session_state.chat_history.append({"role": "assistant", "content": response})
                 logger.info(f"AI 답변 : {response}")
+                torch.cuda.empty_cache()
                 
             except Exception as e:
                 error_message = f"죄송합니다. 오류가 발생했습니다: {str(e)}"
                 st.error(error_message)
                 st.session_state.chat_history.append({"role": "assistant", "content": error_message})
+                torch.cuda.empty_cache()
 
 # 사이드바에 추가 정보
 with st.sidebar:
