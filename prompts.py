@@ -4,9 +4,7 @@ from langchain_core.prompts import ChatPromptTemplate
 
 
 
-# 1. ChatPromptTemplate 객체 생성
-# from_messages를 사용하여 메시지 템플릿을 정의합니다.
-prompt_router = ChatPromptTemplate.from_messages(
+planner_system_prompt_template = ChatPromptTemplate.from_messages(
     [
         ("system", """
         You are a master planner. Given the user's request, create a concise, step-by-step plan
