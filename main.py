@@ -32,7 +32,7 @@ planner_system_prompt_template = ChatPromptTemplate.from_messages(
 )
 
 def create_planner_agent(llm, tools) -> Runnable:
-    """Creating a planner agent"""
+    """Creating a planner agent that smartly breaks down a question of user into sub-questions"""
     tools = [planner_func]
     # This is a conceptual example. A real agent would be more complex.
     llm_with_tools = llm.bind_tools(tools) 
@@ -44,8 +44,6 @@ planner_agent = create_planner_agent(llm)
 
 
 
-def planner_pre_hook(state):
-    """A planner function that smartly breaks down a question of user into sub-questions"""
 
 
 
