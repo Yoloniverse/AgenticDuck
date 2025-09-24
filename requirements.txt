@@ -14,3 +14,4 @@ psycopg[binary,pool]
 langgraph-checkpoint-postgres ##for checkpointer with postgres
 langgraph-checkpoint-sqlite
 langgraph-supervisor
+pycryptodome

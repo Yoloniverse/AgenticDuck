@@ -1,9 +1,10 @@
 
 실제로 구현해야할 (회사에서원하는) 챗봇 확실히 요청하기 
-멀티에이전트 아키텍쳐로 업데이트 (Subgraph)
+멀티에이전트 아키텍쳐로 업데이트 (Subgraph) -> Done 
 Thread, 유저별 히스토리 트래킹 구현 (store interface)
 체크포인트-포스트그레스 연동: langgraph-checkpoint-postgres: An advanced checkpointer that uses Postgres database (PostgresSaver / AsyncPostgresSaver), used in LangGraph Platform. Ideal for using in production. Needs to be installed separately.
-MCP를 사용한 기능 추가
+체크포인트-sqlight 연동 -> DONE
+MCP를 사용한 기능 추가 
 ChainOfThoughts 구현
 query를 decompose 하는 방법 리서치  (Planner and Router)
 디테일 개발

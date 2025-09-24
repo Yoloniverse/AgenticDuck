@@ -1,5 +1,7 @@
+import sqlite3
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.checkpoint.serde.encrypted import EncryptedSerializer
 from langgraph_supervisor import create_supervisor
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_ollama import ChatOllama
@@ -9,15 +11,23 @@ from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.tools import tool
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
-
+from dotenv import load_dotenv
+from prompts import planner_system_prompt_template, router_system_prompt_template
+import os
 # ## should change username, passcode, host, port, database names to real ones.
 # DB_URI = "postgresql://user:password@localhost:5432/dbname" 
-# # checkpointer = PostgresSaver.from_conn_string(DB_URI)
+# checkpointer = PostgresSaver.from_conn_string(DB_URI)
 # checkpoint_saver = PostgresSaver(db_uri=DB_URI, table_name="agent_checkpoints")
 
+load_dotenv()
+print("LANGGRAPH_AES_KEY =", os.getenv("LANGGRAPH_AES_KEY"))
+
+##Sqilite 사용 할 수 있게 하는 코드 
+serde = EncryptedSerializer.from_pycryptodome_aes()  # reads LANGGRAPH_AES_KEY
+checkpointer = SqliteSaver(sqlite3.connect("checkpoint.db"), serde=serde)
 
 llm = ChatOllama(model="qwen3:8b", base_url="http://127.0.0.1:11434")
-checkpointer = SqliteSaver.from_file("langgraph_checkpoints.sqlite")
+# checkpointer = SqliteSaver.from_file("langgraph_checkpoints.sqlite")
  
 
 
@@ -40,9 +50,6 @@ def create_planner_agent(llm, tools) -> Runnable:
     return llm_with_tools_chain
 
 planner_agent = create_planner_agent(llm)
-
-
-
 
 
 
@@ -77,15 +84,9 @@ supervisor = create_supervisor(
     agents=[sql_agent, rag_agent, web_search_agent],
     model=llm,
     pre_model_hook=[planner_agent],
-    prompt=(
-        """너는 사용자 질문을 읽고 분석하여 필요한 기능을 선택하는 역할이야.
-            [중요 원칙]
-
-            [조건]
-
-                """
-    )
+    prompt=(router_system_prompt_template)
 ).compile()
+
 
 for chunk in supervisor.stream(
     {
