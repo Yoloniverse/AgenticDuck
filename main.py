@@ -14,6 +14,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from dotenv import load_dotenv
 from prompts import planner_system_prompt_template, router_system_prompt_template
 import os
+from typing import Any
 # ## should change username, passcode, host, port, database names to real ones.
 # DB_URI = "postgresql://user:password@localhost:5432/dbname" 
 # checkpointer = PostgresSaver.from_conn_string(DB_URI)
@@ -30,28 +31,37 @@ llm = ChatOllama(model="qwen3:8b", base_url="http://127.0.0.1:11434")
 # checkpointer = SqliteSaver.from_file("langgraph_checkpoints.sqlite")
  
 
-
-planner_system_prompt_template = ChatPromptTemplate.from_messages(
-    [
-        ("system", """
-        You are a master planner. Given the user's request, create a concise, step-by-step plan.
-        <<EXAMPLE>>
-        """),
-        ('human'), "{query}"
-    ]
-)
-
-def create_planner_agent(llm, tools) -> Runnable:
-    """Creating a planner agent that smartly breaks down a question of user into sub-questions"""
-    tools = [planner_func]
-    # This is a conceptual example. A real agent would be more complex.
-    llm_with_tools = llm.bind_tools(tools) 
-    llm_with_tools_chain = planner_system_prompt_template | llm_with_tools
-    return llm_with_tools_chain
-
-planner_agent = create_planner_agent(llm)
+class plannerInputState(TypedDict):  
+    task_id: str
+    task_description: str
+    dependencies: List[str]
+    priority: int
 
 
+class PlannerTasks(TypedDict):
+    tasks: List[plannerInputState]
+
+
+
+planner_llm_chain = planner_system_prompt_template | llm.with_structured_output(PlannerTasks)
+
+result = planner_llm_chain.invoke("I wanna go to Italy. tell me how to go to italy and what to eat. And also tell me when the best seasons to visit is")
+result = planner_llm_chain.invoke("I dont know what to do to find a job in Singapore")
+
+result = planner_llm_chain.invoke("Tell me how many people can get prizes by working over 2 years in my company")
+
+
+class routerOutputState(TypedDict):  
+    agent: str
+
+
+
+router_llm_chain = router_system_prompt_template | llm.with_structured_output(routerOutputState)
+
+
+router_llm_chain.invoke('I wanna make select query for sql for example')
+router_llm_chain.invoke('I wanna travel to latin america')
+router_llm_chain.invoke('I wanna check facts in my documents')
 
 
 # 이 ID는 체크포인트 파일 내에서 특정 대화 세션을 식별하는 데 사용됩니다.
@@ -71,11 +81,11 @@ rag_agent = create_react_agent(
     prompt="",
     name="rag_agent"
 )
-web_search_agent = create_react_agent(
+research_agent = create_react_agent(
     model=llm,
     tools=[book_hotel],
     prompt="",
-    name="web_search_agent"
+    name="research_agent"
 )
 
 ##https://docs.langchain.com/oss/python/langchain/short-term-memory#pre-model-hook
