@@ -15,3 +15,10 @@ langgraph-checkpoint-postgres ##for checkpointer with postgres
 langgraph-checkpoint-sqlite
 langgraph-supervisor
 pycryptodome
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch==2.7.1
+--extra-index-url https://download.pytorch.org/whl/cu121
+torchvision==0.22.1
+--extra-index-url https://download.pytorch.org/whl/cu121
+torchaudio==2.7.1
+numpy==1.26.4
