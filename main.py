@@ -12,7 +12,7 @@ from langchain_core.tools import tool
 from langgraph.graph import StateGraph, END, MessagesState, START, StateGraph
 from langgraph.checkpoint.memory import MemorySaver, InMemorySaver
 from dotenv import load_dotenv
-from prompts import planner_system_prompt_template, router_system_prompt_template, document_search_prompt
+from prompts import planner_system_prompt_template, router_system_prompt_template, document_search_prompt, hallucination_check_prompt
 import os
 from typing import Any
 import time
@@ -42,18 +42,47 @@ from langchain_community.vectorstores import Chroma
 # checkpointer = PostgresSaver.from_conn_string(DB_URI)
 # checkpoint_saver = PostgresSaver(db_uri=DB_URI, table_name="agent_checkpoints")
 
+######################################################################
+#                             Save Log                               #
+######################################################################
+os.makedirs('./logs', exist_ok=True)
+logger = logging.getLogger("Agent")
+logger.setLevel(logging.INFO)
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+log_max_size = 1024000
+log_file_count = 3
+log_fileHandler = logging.handlers.RotatingFileHandler(
+        filename=f"./agent.log",
+        maxBytes=log_max_size,
+        backupCount=log_file_count,
+        mode='a')
+
+log_fileHandler.setFormatter(formatter)
+logger.handlers.clear()
+logger.addHandler(log_fileHandler)
+logger.propagate = False
+
 load_dotenv()
 print("LANGGRAPH_AES_KEY =", os.getenv("LANGGRAPH_AES_KEY"))
 
+
+# 메시지를 최대 3세트(6개)로 제한하는 함수
+def add_messages_with_limit(left: list, right: list, max_messages: int = 6) -> list:
+    """메시지를 추가하되, 최대 메시지 수를 제한"""
+    # 기본 add_messages 동작 수행
+    combined = add_messages(left, right)
+    
+    # 최근 max_messages개의 메시지만 유지 (Human-AI 번갈아가는 구조)
+    if len(combined) > max_messages:
+        return combined[-max_messages:]
+    
+    return combined
 class RAGState(TypedDict, total=False):
     messages: Annotated[list[dict], lambda left, right: add_messages_with_limit(left, right, max_messages=6)]
-    query: str
     # 분기 결과
-    path_results: str
+    path_doc: str
     # for RAG
-    rag_retrieved_docs: List[str]
-    rag_reranked_docs: List[str]
-    rag_check_cnt: int
+    rag_docs: List[str]
     rag_error: str
     # source를 사용한 답변 생성 후 hallucination 검토    
     hallucination_check: dict 
@@ -63,55 +92,58 @@ class RAGState(TypedDict, total=False):
     tools_used: Optional[List[str]]  
     tool_calls_made: Optional[bool]
 
-
 class HallucinationState(TypedDict):
     result: bool
     reason: str
+
+class SQLState(TypedDict, total=False):
+    messages: Annotated[list[dict], lambda left, right: add_messages_with_limit(left, right, max_messages=6)]
+    # for DB search
+    sql_db_schema: str
+    sql_draft: str
+    sql_result: str
+    sql_error_cnt: int
+    sql_error_node: str
+    sql_error: Optional[str] 
+    final_answer: str 
+    # 사용된 도구 이름들
+    tools_used: Optional[List[str]]  
+    tool_calls_made: Optional[bool]
+
 class SearchState(TypedDict):
     result: bool
+
+# LLM 모델 load
+llm = ChatOllama(model="qwen3:8b", base_url="http://127.0.0.1:11434")
+
 ##Sqilite 사용 할 수 있게 하는 코드 
 serde = EncryptedSerializer.from_pycryptodome_aes()  # reads LANGGRAPH_AES_KEY
 checkpointer = SqliteSaver(sqlite3.connect("checkpoint.db"), serde=serde)
-
-llm = ChatOllama(model="qwen3:8b", base_url="http://127.0.0.1:11434")
 # checkpointer = SqliteSaver.from_file("langgraph_checkpoints.sqlite")
- 
 
 class plannerInputState(TypedDict):  
     task_id: str
     task_description: str
     dependencies: List[str]
     priority: int
-
-
 class PlannerTasks(TypedDict):
     tasks: List[plannerInputState]
-
-
 
 planner_llm_chain = planner_system_prompt_template | llm.with_structured_output(PlannerTasks)
 
 result = planner_llm_chain.invoke("I wanna go to Italy. tell me how to go to italy and what to eat. And also tell me when the best seasons to visit is")
 result = planner_llm_chain.invoke("I dont know what to do to find a job in Singapore")
-
 result = planner_llm_chain.invoke("Tell me how many people can get prizes by working over 2 years in my company")
-
 
 class routerOutputState(TypedDict):  
     agent: str
 
-
-
 router_llm_chain = router_system_prompt_template | llm.with_structured_output(routerOutputState)
-
-
 router_llm_chain.invoke('I wanna make select query for sql for example')
 router_llm_chain.invoke('I wanna travel to latin america')
 router_llm_chain.invoke('I wanna check facts in my documents')
 
-
-####################### RAG agent test by dykim #######################
-
+####################### document_query_agent setting by dykim #######################
 # chromadb 상수 정의
 CHROMA_DIR = "./chroma_db"
 EMBEDDING_MODEL = "BAAI/bge-m3"  # 한국어 특화 임베딩 모델
@@ -124,76 +156,14 @@ embeddings = HuggingFaceEmbeddings(
         encode_kwargs={'normalize_embeddings': True}
     )
 reranker = CrossEncoder(RERANK_MODEL)
-# final answer chain
-prompt_final = ChatPromptTemplate.from_messages(
-[
-    ("system", """너는 질의응답 챗봇 시스템에서 사용자 질문에 대한 최종 답변을 생성하는 역할이야. 
-                [조건]
-                    - 아래 [정보]는 사용자의 질문을 기반으로 문서에서 조회한 결과야. 결과에 없는 부분은 모른다고 대답하고, 정보에 없는 내용을 덧붙이거나 변형하여 환각을 일으키지 마. 
-                    - 사용자는 내부적으로 어떤 로직에 의해 답변을 생성하는지 알 필요 없어. 일반적인 질의응답의 답변처럼 작성해. '제공된 정보에는~' '제공된 문서에는~' 이런 말투 쓰지마.
-                    - 한국어로 답변해.
-                [정보] \n {rag_reranked_docs}"""),
-    ("human", "{user_question}"),
-    MessagesPlaceholder("messages")
-])
-final_chain = prompt_final | llm.with_config({'temperature': 0})
-# hallucination chain
-prompt_check = ChatPromptTemplate.from_messages(
-[
-    ("system", """너는 RAG(Retrieval-Augmented Generation)결과물인 [문서 정보]과 LLM 모델이 생성한 [생성 답변]을 비교하여, [생성 답변]에 [문서 정보]에 없는 내용이 포함되어있는지 hallucination 여부를 판단하는 역할이야.
-                \n[조건]\n : hallucination 발생 시 True, 없을 시 False를 'result' key에 반환하세요. 그리고 hallucination이 발생했다고 판단한 이유를 'reason' key에 반환하세요.
-                \n[문서 정보]\n {rag_reranked_docs}
-                \n[생성 답변]\n {final_answer}
-                """),
-    ("human", "{user_question}")
-])
-hallucination_chain = prompt_check | llm.with_config({'temperature': 0}).with_structured_output(HallucinationState)
 
-
-
-def rag_init_node(state: RAGState) -> Command[Literal["rag_execute_node", END]]:
-    logger.info(' == [rag_init_node] node init == ')
-    try:
-        # 기존 DB가 존재하는지 확인
-        if os.path.exists(CHROMA_DIR):
-            vectorstore = Chroma(
-                collection_name=COLLECTION,
-                persist_directory=CHROMA_DIR,
-                embedding_function=embeddings
-            )
-
-            return Command(
-                goto="rag_execute_node",
-                update={
-                    "rag_error": None,
-                }
-            )
-        else:
-            return Command(
-                goto=END,
-                update={
-                    "rag_error": "vectorestore initialize 실패",
-                }
-            )
-
-    
-    except Exception as e:
-        print(f"error in initialize_RAG_comp: {e}")
-        return Command(
-                goto=END,
-                update={
-                    "rag_error": "initialize_RAG_component 실패",
-                }
-            )
 @tool
 def search_company_documents(category: str, query: str) -> Dict[str, Any]:
     """
     회사 문서를 검색합니다.
-    
     Args:
         category: 문서 카테고리 ("인사규정", "전자결재규정", "회사소개" 중 하나)
         query: 검색할 질문이나 키워드
-    
     Returns:
         검색 결과와 상태 정보
     """
@@ -213,7 +183,6 @@ def search_company_documents(category: str, query: str) -> Dict[str, Any]:
                 "collection_name": "company_info"
             }
         }
-        
         if category not in category_mapping:
             return {
                 "success": False,
@@ -221,7 +190,6 @@ def search_company_documents(category: str, query: str) -> Dict[str, Any]:
                 "results": [],
                 "category": category
             }
-        
         config = category_mapping[category]
         chroma_dir = config["chroma_dir"]
         collection_name = config["collection_name"]
@@ -242,15 +210,19 @@ def search_company_documents(category: str, query: str) -> Dict[str, Any]:
             embedding_function=embeddings
         )
         # 문서 검색 수행
-        search_results = vectorstore.similarity_search_with_score(
-            query=query,
-            k=5  # 상위 5개 문서 검색
-        )
-        # 결과 포맷팅
+        retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 5})
+        documents = retriever.get_relevant_documents(query)
+        
+        # rerank
+        query_doc_pairs = [(query, doc.page_content) for doc in documents]
+        scores = reranker.predict(query_doc_pairs)
+        scored_docs = list(zip(scores, documents))
+        scored_docs.sort(key=lambda x: x[0], reverse=True)
+        # 상위 k개 문서 반환, 결과 포맷팅
         formatted_results = []
-        for doc, score in search_results:
+        for score, doc in scored_docs[:top_k]:
             formatted_results.append({
-                "content": doc.page_content,
+                "content": '<Document>' + doc.page_content[:] + '</Document>',
                 "metadata": doc.metadata,
                 "similarity_score": float(score)
             })
@@ -270,139 +242,140 @@ def search_company_documents(category: str, query: str) -> Dict[str, Any]:
             "results": [],
             "category": category
         }
-
-# 추후에 toolnode로 만들고 
-def rag_execute_node(state: RAGState) -> RAGState:
-    logger.info(' == [rag_execute_node] node init == ')
-    # retrive
-    retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 5})
-    documents = retriever.get_relevant_documents(state['messages'][-1].content)
-    # rerank
-    query_doc_pairs = [(state['messages'][-1].content, doc.page_content) for doc in documents]
-    scores = reranker.predict(query_doc_pairs)
-    scored_docs = list(zip(scores, documents))
-    scored_docs.sort(key=lambda x: x[0], reverse=True)
-    # 상위 k개 문서 반환
-    reranked_docs = ['<Document>' + doc.page_content[:] + '</Document>' for score, doc in scored_docs[:top_k]]
-
-    return {
-        "rag_retrieved_docs": documents,
-        "rag_reranked_docs": reranked_docs
-    }
-
-def rag_final_answer_gen(state: RAGState) -> RAGState:
-    logger.info(' == [rag_final_answer_gen] node init == ')
-
-    rag_reranked_docs = state['rag_reranked_docs']
-
-    output = final_chain.invoke({
-        "user_question": state['messages'][-1].content, 
-        "messages": state["messages"],
-        "rag_reranked_docs": rag_reranked_docs
-        })
-    return {
-        "messages": AIMessage(content=output.content.split('</think>\n\n')[-1]),
-        "final_answer": output.content.split('</think>\n\n')[-1]
-    }
-
-def hallucination_check(state: RAGState) -> RAGState:
-    logger.info(' == [hallucination_check] node init == ')
-
-    rag_reranked_docs = state['rag_reranked_docs']
-    final_answer = state['final_answer']        
-    output = hallucination_chain.invoke({
-        "user_question": state['messages'][-1].content,
-        "rag_reranked_docs": rag_reranked_docs,
-        "final_answer": final_answer
-        })
-    check_result = output['result']
-    # hallucination 발생
-    if check_result:
-        return {
-                    "hallucination_check": output,
-                    "final_answer": state["final_answer"] + "\n* 이 답변은 정확하지 않은 정보를 포함하고 있는 점 참고바랍니다.\n"
-                }
-    # hallucination 발생하지 않아서 종료
-    else:
-        return {
-                    "hallucination_check": output,
-                }
-############################## tool test by dykim ################################
+# document_query_agent 셋팅
 tools = [search_company_documents]
-agent = create_tool_calling_agent(llm, tools, document_search_prompt)
+agent = create_tool_calling_agent(llm.with_config({'temperature': 0.5, 'timeout': 15}), tools, document_search_prompt)
 agent_executor = AgentExecutor(
     agent=agent, 
     tools=tools, 
     verbose=False, 
     return_intermediate_steps=True
 )
+# for hallucination check
+hallucination_chain = hallucination_check_prompt | llm.with_config({'temperature': 0}).with_structured_output(HallucinationState)
 
-test_query = "국내 출장 시 외근교통비 청구 기준이 어떻게 되나요?"
+def rag_exacute_node(state: RAGState) -> RAGState:
+    logger.info(' == [rag_exacute_node] node init == ')
+    try:
+        user_query = state['messages'][-1].content
+        result = agent_executor.invoke({"input": test_query, "messages": state["messages"]})
+        path_doc = result['intermediate_steps'][0][0].tool_input['category']
+        output_answer = result['output'].split('</think>\n\n')[-1]
+        output_documents = [content['content'] for content in result['intermediate_steps'][-1][-1]['results']]
+        # hallucination check
+        hallucination_check = hallucination_chain.invoke({
+            "user_question": user_query,
+            "rag_docs": output_documents,
+            "final_answer": output_answer
+            })
+        check_result = hallucination_check['result']
+        if check_result:
+            output_answer = output_answer + "\n* 이 답변은 정확하지 않은 정보를 포함하고 있는 점 참고바랍니다.\n"
+        else:
+            pass
 
-result = agent_executor.invoke({"input": test_query})
-print(f"질문: {test_query}")
-print(result['output'].split('</think>\n\n')[-1])
-print(f"중간 단계 수: {len(result['intermediate_steps'])}")
-##############################################################
+        return {
+            "path_doc": path_doc,
+            "rag_docs": output_documents,
+            "rag_error": "None",
+            "final_answer": output_answer,
+            "hallucination_check": hallucination_check,
+            "messages": AIMessage(content=output_answer),
 
-agent = create_tool_calling_agent(llm.with_config({'temperature': 0.3}), tools, prompt_init)
-agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=False, return_intermediate_steps=True)
+        }
+    except Exception as e:
+        return {
+            "rag_error": "Error in [rag_exacute_node]" + f"{e}"
+        }
+    
 
-builder = StateGraph(RAGState)
+############################## document_query_agent test by dykim ################################
+document_query_build = StateGraph(RAGState)
 # node
-builder_rag.add_node("rag_init_node", rag_init_node)
-builder_rag.add_node("rag_execute_node", rag_execute_node)
-builder_rag.add_node("rag_final_answer_gen", rag_final_answer_gen)
-builder_rag.add_node("hallucination_check", hallucination_check)
+document_query_build.add_node("rag_exacute_node", rag_exacute_node)
 # edge
-builder_rag.add_edge(START, "rag_init_node")
-builder_rag.add_edge("rag_init_node", "rag_execute_node")
-builder_rag.add_edge("rag_execute_node", "rag_final_answer_gen")
-builder_rag.add_edge("rag_final_answer_gen", "hallucination_check")
-builder_rag.add_edge("hallucination_check", END)
+document_query_build.add_edge(START, "rag_exacute_node")
+document_query_build.add_edge("rag_exacute_node", END)
 checkpointer = MemorySaver()
-graph_rag = builder_rag.compile(checkpointer=checkpointer)
+document_query_agent = document_query_build.compile(checkpointer=checkpointer)
 
-###########################################################################
+config = {"configurable": {"threa구조d_id": "dayeon"}}
+test_query = "국내 출장 시 일비 기준이 어떻게 되나요?"
+human_message = {
+                    "messages": [{"role":"user","content":test_query}], 
+                    "rag_docs": [],
+                    "rag_error": None,
+                    }
+
+result = document_query_agent.invoke(human_message, config=config)
+
+# visualization
+from IPython.display import Image
+# PNG 바이트 생성
+png_bytes = document_query_agent.get_graph().draw_mermaid_png()
+# 파일로 저장
+with open("document_query_agent.png", "wb") as f:
+    f.write(png_bytes)
+
+####################### db_query_agent setting by dykim #######################
+db_user = os.getenv("DB_USER")
+db_password = os.getenv("DB_PASSWORD")
+db_host = os.getenv("DB_HOST")
+db_name = os.getenv("DB_NAME")
+connection_string = f"mysql+pymysql://{db_user}:{db_password}@{db_host}/{db_name}"
+engine = create_engine(connection_string)
+connection = engine.connect()
+inspector = inspect(engine)
+max_gen_sql = 2
 
 
+############################## db_query_agent test by dykim ################################
+db_query_build = StateGraph(SQLState)
+# node
+db_query_build.add_node("", )
+# edge
+db_query_build.add_edge(START, "")
+db_query_build.add_edge("", END)
+checkpointer = MemorySaver()
+db_query_agent = db_query_build.compile(checkpointer=checkpointer)
 
-
-
-
-# 이 ID는 체크포인트 파일 내에서 특정 대화 세션을 식별하는 데 사용됩니다.
 config = {"configurable": {"thread_id": "dayeon"}}
+test_query = "김다연님의 근무위치는 어디인가요?"
+human_message = {
+                    "messages": [{"role":"user","content":test_query}], 
+                    "rag_docs": [],
+                    "rag_error": None,
+                    }
 
+result = db_query_agent.invoke(human_message, config=config)
 
-sql_agent = create_react_agent(
+################################### Architecture ############################################
+
+policy_guidance_team = create_supervisor(
+    agents=[document_query_agent, db_query_agent],
     model=llm,
-    tools=[],
-    prompt="",
-    name="sql_agent"
-)
+    prompt=policy_guidance_supervisor_prompt
+).compile()
 
-rag_agent = create_react_agent(
-    model=llm,
-    tools=[],
-    prompt="",
-    name="rag_agent"
-)
-research_agent = create_react_agent(
-    model=llm,
-    tools=[book_hotel],
-    prompt="",
-    name="research_agent"
-)
 
-##https://docs.langchain.com/oss/python/langchain/short-term-memory#pre-model-hook
-##https://langchain-ai.github.io/langgraph/how-tos/create-react-agent-manage-message-history/
-supervisor = create_supervisor(
-    agents=[sql_agent, rag_agent, web_search_agent],
+research_team = create_supervisor(
+    agents=[research_agent],
+    model=llm,
+    prompt=research_supervisor_prompt
+).compile()
+
+top_supervisor = create_supervisor(
+    agents=[policy_guidance_team, research_team],
     model=llm,
     pre_model_hook=[planner_agent],
     prompt=(router_system_prompt_template)
 ).compile()
 
+
+###########################################################################
+
+##https://docs.langchain.com/oss/python/langchain/short-term-memory#pre-model-hook
+##https://langchain-ai.github.io/langgraph/how-tos/create-react-agent-manage-message-history/
 
 for chunk in supervisor.stream(
     {

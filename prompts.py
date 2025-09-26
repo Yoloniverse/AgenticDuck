@@ -1,6 +1,6 @@
 
 from langchain_ollama import ChatOllama
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 
 
@@ -155,6 +155,8 @@ document_search_prompt = ChatPromptTemplate.from_messages([
             - 여러 카테고리가 관련된 경우 주요 키워드가 속한 카테고리를 우선 선택
             - 도구 호출 시 정확한 카테고리명 사용 ("인사규정", "전자결재규정", "회사소개")
             - 검색 결과가 없거나 오류가 발생한 경우 적절한 안내 메시지 제공
+            - 검색 결과에 없는 부분은 모른다고 대답하고, 정보에 없는 내용을 덧붙이거나 변형하여 환각을 일으키지 마. 
+            - 사용자는 내부적으로 어떤 로직에 의해 답변을 생성하는지 알 필요 없어. 일반적인 질의응답의 답변처럼 작성해. '제공된 정보에는~' '제공된 문서에는~' 이런 말투 쓰지마.
 
             **답변 형식:**
             - 친근하고 전문적인 톤 유지
@@ -163,5 +165,14 @@ document_search_prompt = ChatPromptTemplate.from_messages([
             - 필요시 추가 문의처나 절차 안내
                     """),
             ("user", "{input}"),
+            MessagesPlaceholder("messages"),
             ("placeholder", "{agent_scratchpad}")
+        ])
+hallucination_check_prompt = ChatPromptTemplate.from_messages([
+            ("system", """너는 RAG(Retrieval-Augmented Generation)결과물인 [문서 정보]과 LLM 모델이 생성한 [생성 답변]을 비교하여, [생성 답변]에 [문서 정보]에 없는 내용이 포함되어있는지 hallucination 여부를 판단하는 역할이야.
+                        \n[조건]\n : hallucination 발생 시 True, 없을 시 False를 'result' key에 반환하세요. 그리고 hallucination이 발생했다고 판단한 이유를 'reason' key에 반환하세요.
+                        \n[문서 정보]\n {rag_docs}
+                        \n[생성 답변]\n {final_answer}
+                        """),
+            ("human", "{user_question}")
         ])
