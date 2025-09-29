@@ -89,7 +89,7 @@ if "thread_id" not in st.session_state:
 @st.cache_resource
 def initialize_graph():
     logger.info("채팅 초기화")
-    llm = ChatOllama(model="qwen3:8b", base_url="http://127.0.0.1:11434")
+    llm = ChatOllama(model="qwen3:8b", base_url="http://10.110.31.177:11434")
 
     # 메시지를 최대 3세트(6개)로 제한하는 함수
     def add_messages_with_limit(left: list, right: list, max_messages: int = 6) -> list:
@@ -718,6 +718,7 @@ def initialize_graph():
             else:
                 return {
                             "hallucination_check": output,
+                            "final_answer": state["final_answer"]
                         }
 
     rag_manager = RAGManager()
@@ -836,7 +837,7 @@ if prompt := st.chat_input("궁금한 것을 물어보세요!"):
                 # logger.info(f"AI 답변 : {response}")
                 # torch.cuda.empty_cache()
 
-                ############# 그래프 스트리밍 실행 ################
+                ############# 그래프 실행 (stream) ################
                 response_placeholder = st.empty()
                 full_response = ""
                 content = False
@@ -866,38 +867,8 @@ if prompt := st.chat_input("궁금한 것을 물어보세요!"):
                                 else:
                                     content = str(last_message)
                                         
-                        # # 점진적으로 응답 누적
-                        # full_response += content
-                        # response_placeholder.write(full_response)
-
-                    # 단어 단위로 타이핑 효과
-                #     if content:
-                #         # 중간 과정: 단어 단위 타이핑 (raw text)
-                #         if not is_complete:
-                #             words = content.split()
-                #             temp_response = ""
-                #             for word in words:
-                #                 temp_response += word + " "
-                #                 # 중간에는 raw text로 표시
-                #                 response_placeholder.markdown(temp_response + "▌")
-                #                 time.sleep(0.03)
-                #             full_response = content
-                #         else:
-                #             # 최종: 마크다운 렌더링
-                #             full_response = content
-                #             response_placeholder.markdown(full_response)
-                
-                # # 최종 확인
-                # if full_response and not is_complete:
-                #     response_placeholder.markdown(full_response)
-    
-                
-                # # 최종 응답이 없으면 기본 메시지
-                # if not full_response:
-                #     full_response = "죄송합니다. 답변을 생성할 수 없습니다."
-                #     response_placeholder.markdown(full_response)
                             
-                    # 문단 단위로 타이핑 효과
+                    # 문단 단위로 마크다운 효과 적용
                     if content:
                         accumulated_text = ""
                         i = 0
@@ -941,7 +912,7 @@ if prompt := st.chat_input("궁금한 것을 물어보세요!"):
                                         break
                                     paragraph += lines[i] + "\n"
                                     i += 1
-                                    logger.info(f"paragraph: {paragraph}")
+                                    
                                 
                                 # 단어 단위로 타이핑
                                 if paragraph.strip():
