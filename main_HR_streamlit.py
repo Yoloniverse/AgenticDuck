@@ -223,7 +223,8 @@ def initialize_graph():
     tools = [taviliy_web_search_tool]
     prompt_gen = ChatPromptTemplate.from_messages(
         [
-            ("system", f"""너는 사용자의 일반적인 질문에 답변하는 Assistant야. 만약 웹 서치가 필요한 질문이라면 제공된 web search tool을 사용하고, 아닌 경우 바로 답변을 생성해.
+            ("system", f"""너는 직원들에게 사내 규정에 대한 질문에 답변하는 Assistant야. 사용자가 HR과 직접 관련이 없는 질문을 했지만, 여전히 HR 챗봇으로서의 정체성은 유지해.
+            만약 웹 서치가 필요한 질문이라면 제공된 web search tool을 사용하고, 아닌 경우 바로 답변을 생성해.
                         [web search가 필요한 경우 예시]
                          - 실시간 데이터에 접근해야 하는 경우
                          - 최신 뉴스, 주식 가격, 날씨, 날짜
@@ -813,33 +814,169 @@ if prompt := st.chat_input("궁금한 것을 물어보세요!"):
                     }
                 config = {"configurable": {"thread_id": st.session_state.thread_id}}
                 
-                # 그래프 실행
-                result = graph.invoke(
-                    human_message, 
+                # ############## 그래프 실행 (invoke) #############
+                # result = graph.invoke(
+                #     human_message, 
+                #     config=config
+                # )
+                # logger.info(f"AppState : {result}")
+                
+                # # 결과에서 답변 추출
+                # if "final_answer" in result and result["final_answer"]:
+                #     response = result["final_answer"]
+                # elif result["messages"]:
+                #     response = result["messages"][-1].content
+                # else:
+                #     response = "죄송합니다. 답변을 생성할 수 없습니다."
+                
+                # st.write(response)
+                
+                # # 응답을 채팅 히스토리에 추가
+                # st.session_state.chat_history.append({"role": "assistant", "content": response})
+                # logger.info(f"AI 답변 : {response}")
+                # torch.cuda.empty_cache()
+
+                ############# 그래프 스트리밍 실행 ################
+                response_placeholder = st.empty()
+                full_response = ""
+                content = False
+                is_complete = False
+
+                for chunk in graph.stream(
+                    human_message,
                     config=config
-                )
-                logger.info(f"AppState : {result}")
+                ):
+                    logger.info(f"Stream chunk: {chunk}")
+                    
+                    # 청크에서 답변 추출
+                    for node_name, node_output in chunk.items():
+                        if node_name in ["general", "sql_final_answer_gen", "hallucination_check", "security_filter"]:
+                            logger.info(f"Node: {node_name}, Output keys: {node_output.keys()}")
+
+                            # final_answer가 있으면 사용
+                            if "final_answer" in node_output:
+                                content = node_output["final_answer"]
+                                is_complete = True
+                                break
+                            # messages가 있으면 사용
+                            elif "messages" in node_output:
+                                last_message = node_output["messages"]
+                                if hasattr(last_message, 'content'):
+                                    content = last_message.content
+                                else:
+                                    content = str(last_message)
+                                        
+                        # # 점진적으로 응답 누적
+                        # full_response += content
+                        # response_placeholder.write(full_response)
+
+                    # 단어 단위로 타이핑 효과
+                #     if content:
+                #         # 중간 과정: 단어 단위 타이핑 (raw text)
+                #         if not is_complete:
+                #             words = content.split()
+                #             temp_response = ""
+                #             for word in words:
+                #                 temp_response += word + " "
+                #                 # 중간에는 raw text로 표시
+                #                 response_placeholder.markdown(temp_response + "▌")
+                #                 time.sleep(0.03)
+                #             full_response = content
+                #         else:
+                #             # 최종: 마크다운 렌더링
+                #             full_response = content
+                #             response_placeholder.markdown(full_response)
                 
-                # 결과에서 답변 추출
-                if "final_answer" in result and result["final_answer"]:
-                    response = result["final_answer"]
-                elif result["messages"]:
-                    response = result["messages"][-1].content
+                # # 최종 확인
+                # if full_response and not is_complete:
+                #     response_placeholder.markdown(full_response)
+    
+                
+                # # 최종 응답이 없으면 기본 메시지
+                # if not full_response:
+                #     full_response = "죄송합니다. 답변을 생성할 수 없습니다."
+                #     response_placeholder.markdown(full_response)
+                            
+                    # 문단 단위로 타이핑 효과
+                    if content:
+                        accumulated_text = ""
+                        i = 0
+                        lines = content.split('\n')
+                        
+                        while i < len(lines):
+                            line = lines[i]
+                            
+                            # 코드 블록 시작 감지
+                            if line.strip().startswith('```'):
+                                # 코드 블록 전체를 하나로 처리
+                                code_block = line + "\n"
+                                i += 1
+                                
+                                # 닫는 ```까지 수집
+                                while i < len(lines):
+                                    code_block += lines[i] + "\n"
+                                    if lines[i].strip().startswith('```'):
+                                        i += 1
+                                        break
+                                    i += 1
+                                
+                                # 코드 블록 전체를 한 번에 표시
+                                accumulated_text += code_block
+                                response_placeholder.markdown(accumulated_text + "▌")
+                                time.sleep(0.3)
+                                response_placeholder.markdown(accumulated_text)
+                            
+                            # 빈 줄
+                            elif not line.strip():
+                                accumulated_text += "\n"
+                                i += 1
+                            
+                            # 일반 텍스트 (문단)
+                            else:
+                                # 현재 줄부터 다음 빈 줄까지를 하나의 문단으로
+                                paragraph = ""
+                                while i < len(lines) and lines[i].strip():
+                                    # 코드 블록 시작이면 중단
+                                    if lines[i].strip().startswith('```'):
+                                        break
+                                    paragraph += lines[i] + "\n"
+                                    i += 1
+                                    logger.info(f"paragraph: {paragraph}")
+                                
+                                # 단어 단위로 타이핑
+                                if paragraph.strip():
+                                    words = paragraph.split(" ")
+                                    temp_para = ""
+                                    for word in words:
+                                        temp_para += word + " "
+                                        display_text = accumulated_text + temp_para + "▌"
+                                        response_placeholder.markdown(display_text)
+                                        time.sleep(0.03)
+                                    
+                                    accumulated_text += temp_para.strip() + "\n"
+                                    response_placeholder.markdown(accumulated_text)
+                                    time.sleep(0.1)
+                        
+                        full_response = accumulated_text.strip()
+
+                # 최종 렌더링
+                if full_response:
+                    response_placeholder.markdown(full_response)
                 else:
-                    response = "죄송합니다. 답변을 생성할 수 없습니다."
-                
-                st.write(response)
-                
+                    full_response = "죄송합니다. 답변을 생성할 수 없습니다."
+                    response_placeholder.markdown(full_response)
+
                 # 응답을 채팅 히스토리에 추가
-                st.session_state.chat_history.append({"role": "assistant", "content": response})
-                logger.info(f"AI 답변 : {response}")
+                st.session_state.chat_history.append({"role": "assistant", "content": full_response})
+                logger.info(f"AI 답변 : {full_response}")
                 torch.cuda.empty_cache()
                 
             except Exception as e:
-                error_message = f"죄송합니다. 오류가 발생했습니다: {str(e)}"
+                error_message = f"죄송합니다. 오류가 발생했습니다 {str(e)}: {traceback.format_exc()}"
                 st.error(error_message)
                 st.session_state.chat_history.append({"role": "assistant", "content": error_message})
                 torch.cuda.empty_cache()
+                logger.error(traceback.format_exc())
 
 # 사이드바에 추가 정보
 with st.sidebar:
