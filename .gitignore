@@ -5,6 +5,7 @@ __pycache__
 .env
 hr_files/
 /venv/*
+/.venv/*
 /logs/*
 /chromadb
 /nohup.out

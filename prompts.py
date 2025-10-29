@@ -121,6 +121,27 @@ router_system_prompt_template = ChatPromptTemplate.from_messages([
                 "research_supervisor"
 
                """),  
-    ("user", "{input}")  
+    ("user", "{query}")  
+])
+
+
+
+
+repeat_refined_query_system_prompt_template = ChatPromptTemplate.from_messages([
+    ("system", """
+                You are a master of understanding user's query. You must show your deep understanding of user's query by repeating user's query in a refined way with different wordings. You must never just copy what user said.
+                As users must understand clearly your repeated query is exactly what they want, you must be very concise and clear with easy and clear language.
+                You should not suggest any answer to the question. You must only repeat the query in a refined and rephased way. And you should answer as if you hear from user and you tell the user back your understanding.
+                <<EXAMPLE>>
+                User query: 
+                I have a plan to go to Australia, but I do not know how much money I need to prepare for the trip.
+     
+                Your answer:
+                Let me rephrase your question!
+                Your plan is to visit Australia. But yet you are not sure about the budget you should aim.
+                Is my understanding correct?
+     
+               """),  
+    ("user", "{query}")  
 ])
 
