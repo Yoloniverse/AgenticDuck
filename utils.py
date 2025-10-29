@@ -1,5 +1,7 @@
 
 
+
+
 def create_server_config(mcp_json):
     """MCP 서버 설정을 생성합니다."""
     config = mcp_json

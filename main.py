@@ -2,6 +2,7 @@ import sqlite3
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.checkpoint.serde.encrypted import EncryptedSerializer
+from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph_supervisor import create_supervisor
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_ollama import ChatOllama
@@ -12,9 +13,12 @@ from langchain_core.tools import tool
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 from dotenv import load_dotenv
+from utils import create_server_config
 from prompts import planner_system_prompt_template, router_system_prompt_template
 import os
 from typing import Any
+import json
+from pprint import pprint
 # ## should change username, passcode, host, port, database names to real ones.
 # DB_URI = "postgresql://user:password@localhost:5432/dbname" 
 # checkpointer = PostgresSaver.from_conn_string(DB_URI)
@@ -31,6 +35,20 @@ llm = ChatOllama(model="qwen3:8b", base_url="http://127.0.0.1:11434")
 # checkpointer = SqliteSaver.from_file("langgraph_checkpoints.sqlite")
  
 
+
+
+## MCP
+with open("/home/sdt/Workspace/mvai/AgenticRAG/duckduckgosearch_mcp.json", "r", encoding="utf-8") as f:
+    mcp_info = json.load(f)
+
+
+mcp_servers = create_server_config(mcp_info)
+mcp_clients = MultiServerMCPClient(mcp_servers)
+mcp_clients_tools = await mcp_clients.get_tools()
+mcp_clients_tools[0]
+pprint(mcp_clients_tools)
+## Building Planner
+
 class plannerInputState(TypedDict):  
     task_id: str
     task_description: str
@@ -41,6 +59,10 @@ class plannerInputState(TypedDict):
 class PlannerTasks(TypedDict):
     tasks: List[plannerInputState]
 
+## https://langchain-ai.github.io/langgraph/how-tos/create-react-agent-manage-message-history/
+def planner_pre_model_hook(state: PlannerTasks):
+    planner_result = planner_llm_chain.invoke(state)
+    return {"messages": planner_result}
 
 
 planner_llm_chain = planner_system_prompt_template | llm.with_structured_output(PlannerTasks)
@@ -68,32 +90,39 @@ router_llm_chain.invoke('I wanna check facts in my documents')
 config = {"configurable": {"thread_id": "dayeon"}}
 
 
-sql_agent = create_react_agent(
+sql_supervisor = create_react_agent(
     model=llm,
     tools=[],
     prompt="",
     name="sql_agent"
 )
 
-rag_agent = create_react_agent(
+rag_supervisor = create_react_agent(
     model=llm,
     tools=[],
     prompt="",
     name="rag_agent"
 )
-research_agent = create_react_agent(
+research_supervisor = create_react_agent(
     model=llm,
     tools=[book_hotel],
     prompt="",
     name="research_agent"
 )
 
+
+def planner_pre_model_hook(inputs: dict, config: dict):
+    """Supervisor 실행 전에 입력을 PlannerTasks 구조로 변환"""
+    planner_result = planner_llm_chain.invoke(inputs, config)
+    # supervisor에 넘겨줄 형식으로 변환해서 리턴
+    return {"planner_tasks": planner_result}
+
 ##https://docs.langchain.com/oss/python/langchain/short-term-memory#pre-model-hook
 ##https://langchain-ai.github.io/langgraph/how-tos/create-react-agent-manage-message-history/
 supervisor = create_supervisor(
-    agents=[sql_agent, rag_agent, web_search_agent],
+    agents=[sql_supervisor, rag_supervisor, research_supervisor],
     model=llm,
-    pre_model_hook=[planner_agent],
+    pre_model_hook=[planner_pre_model_hook],
     prompt=(router_system_prompt_template)
 ).compile()
 

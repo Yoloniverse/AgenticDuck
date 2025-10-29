@@ -8,3 +8,4 @@ hr_files/
 /logs/*
 /chromadb
 /nohup.out
+mcp_test.py
