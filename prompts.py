@@ -42,7 +42,7 @@ planner_system_prompt_template = ChatPromptTemplate.from_messages(
          
         rules: 
         You must give priority with integer number from 1 to 1000000 in order
-         
+
         {{
         {{"task_id": "task_1",
          "task_description": "Analyze weather of Italy in September",
@@ -77,7 +77,7 @@ planner_system_prompt_template = ChatPromptTemplate.from_messages(
         
       
         """),
-        ('human'), "{query}"
+        ('human'), "{messages}"
     ]
 )
 
@@ -121,7 +121,7 @@ router_system_prompt_template = ChatPromptTemplate.from_messages([
                 "research_supervisor"
 
                """),  
-    ("user", "{query}")  
+    ("user", "{messages}")  
 ])
 
 
@@ -142,6 +142,6 @@ repeat_refined_query_system_prompt_template = ChatPromptTemplate.from_messages([
                 Is my understanding correct?
      
                """),  
-    ("user", "{query}")  
+    ("user", "{messages}")  
 ])
 

@@ -1,4 +1,5 @@
-import sqlite3
+
+
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.checkpoint.serde.encrypted import EncryptedSerializer
@@ -6,16 +7,24 @@ from langgraph_supervisor import create_supervisor
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_ollama import ChatOllama
 from langgraph.graph.message import add_messages
-from typing import TypedDict, List, Annotated
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.tools import tool
 from langgraph.graph import StateGraph, END, START
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.memory import MemorySaver, InMemorySaver ## This should be changed to PostgresSaver
+from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.store.memory import InMemoryStore
+from langchain_core.runnables import RunnableConfig
 from langchain.agents import create_agent
+from langgraph.types import RetryPolicy, CachePolicy
+from langchain_core.runnables import RunnableLambda
+
+from typing import TypedDict, List, Annotated, Any
+import sqlite3
 from dotenv import load_dotenv
 from prompts import planner_system_prompt_template, router_system_prompt_template, repeat_refined_query_system_prompt_template
 import os
-from typing import Any
+import uuid
+
 # ## should change username, passcode, host, port, database names to real ones.
 # DB_URI = "postgresql://user:password@localhost:5432/dbname" 
 # checkpointer = PostgresSaver.from_conn_string(DB_URI)
@@ -26,56 +35,91 @@ print("LANGGRAPH_AES_KEY =", os.getenv("LANGGRAPH_AES_KEY"))
 
 ##Sqilite 사용 할 수 있게 하는 코드 
 serde = EncryptedSerializer.from_pycryptodome_aes()  # reads LANGGRAPH_AES_KEY
-checkpointer = SqliteSaver(sqlite3.connect("checkpoint.db"), serde=serde)
+checkpointer = SqliteSaver(sqlite3.connect("checkpoint.db", check_same_thread=False), serde=serde)
 
 llm = ChatOllama(model="qwen3:8b", base_url="http://127.0.0.1:11434")
 # checkpointer = SqliteSaver.from_file("langgraph_checkpoints.sqlite")
  
 
-class InputState(TypedDict):  
+class UserInputState(TypedDict):  
     messages: Annotated[List[BaseMessage], add_messages]
 
-class plannerInputState(TypedDict):  
+class plannerOutputState(TypedDict):  
+    task_id: str
+    task_description: str
+    dependencies: List[str]
+    priority: int
+
+class PlannerTasksState(TypedDict):
+    tasks: List[plannerOutputState]
+
+planner_llm_chain = planner_system_prompt_template | llm.with_structured_output(PlannerTasksState)
+# decomposed_result = planner_llm_chain.invoke("I wanna go to Italy. tell me how to go to italy and what to eat. And also tell me when the best seasons to visit is")
+decomposed_result = planner_llm_chain.invoke({"messages": [{"type": "human", "content": "I dont know what to do to find a job in Singapore"}]} )
+# type(decomposed_result)
+
+
+class QueryRefineryTasks(TypedDict):
+    user_question: str
+# refinery_llm_chain = repeat_refined_query_system_prompt_template | llm.with_structured_output(QueryRefineryTasks)
+refinery_llm_chain = repeat_refined_query_system_prompt_template | llm
+# result = refinery_llm_chain.invoke({"query": [{"type": "human", "content": "I wanna know how to go to Singapore from KL in Malaysia"}]})
+# result = refinery_llm_chain.invoke({"query": [{"type": "human", "content": "What the fuck is wrong with this world?"}]})
+
+class routerOutputState(TypedDict):  
+    agent: str
+    task: plannerOutputState
+
+router_llm_chain = router_system_prompt_template | llm.with_structured_output(routerOutputState)
+
+class SupervisorOverallState(TypedDict):
+    messages: Annotated[List[BaseMessage], add_messages]
+    user_question: str
+    tasks: List[plannerOutputState]
     task_id: str
     task_description: str
     dependencies: List[str]
     priority: int
 
 
-class PlannerTasks(TypedDict):
-    tasks: List[plannerInputState]
-
-planner_llm_chain = planner_system_prompt_template | llm.with_structured_output(PlannerTasks)
-
-def task_decompose_node()
-decomposed_result = planner_llm_chain.invoke("I wanna go to Italy. tell me how to go to italy and what to eat. And also tell me when the best seasons to visit is")
-decomposed_result = planner_llm_chain.invoke({"query": [{"type": "human", "content": "I dont know what to do to find a job in Singapore"}]} )
-type(decomposed_result)
-
-decomposed_result['tasks']
-
-
-class QueryRefineryTasks(TypedDict):
-    user_question: str
-
-refinery_llm_chain = repeat_refined_query_system_prompt_template | llm.with_structured_output(QueryRefineryTasks)
-refinery_llm_chain = repeat_refined_query_system_prompt_template | llm
-
-result = refinery_llm_chain.invoke({"query": [{"type": "human", "content": "I wanna know how to go to Singapore from KL in Malaysia"}]})
-result = refinery_llm_chain.invoke({"query": [{"type": "human", "content": "What the fuck is wrong with this world?"}]})
 
 
 
+def task_decompose_node(state: UserInputState) -> PlannerTasksState:
+    print(state['messages'])
+    decomposed_result = planner_llm_chain.invoke({"messages": [{"type": "human", "content": state['messages'][-1].content}]})
+    return decomposed_result
 
 
+async def subtask_executor_worker(state: plannerOutputState) -> routerOutputState:
+    """
+    (Async) 개별 태스크를 실행하는 워커
+    (실제로는 여기서 웹 검색, API 호출 등이 비동기로 일어남)
+    """
+    # desc = task.task_description
+    # print(f"  > (Async) 태스크 시작: '{desc}'")
+    # 비동기 작업 시뮬레이션
+    task = state['task_description']
+    result = await router_llm_chain.ainvoke({"messages": [{"type": "human", "content": task}]})
+    # result = f"[Execution Result for: '{desc}']"
+    # print(f"  < (Async) 태스크 완료: '{desc}'")
+    return result
+
+def task_routing_node(state: PlannerTasksState) -> routerOutputState:
+    
+
+    if not state['tasks']:
+        return {"completed_results": []}
+    print(f"\nDEBUG: 'task_routing_node'가 {len(state['tasks'])}개의 태스크를 병렬 실행합니다.")
+    subtask_worker_runnable = RunnableLambda(subtask_executor_worker)
+    results = await subtask_worker_runnable.abatch(decomposed_result['tasks'])
 
 
-class routerOutputState(TypedDict):  
-    agent: str
+    return decomposed_result
 
-router_llm_chain = router_system_prompt_template | llm.with_structured_output(routerOutputState)
 
-len(decomposed_result['tasks'])
+PlannerTasksState
+
 
 
 task_agents = []
@@ -132,44 +176,35 @@ research_agent = create_agent(
 )
 
 
-class SupervisorOverallState(TypedDict):
-    messages: Annotated[List[BaseMessage], add_messages]
-    user_question: str
-    tasks: List[plannerInputState]
-    task_id: str
-    task_description: str
-    dependencies: List[str]
-    priority: int
+
+
+in_memory_store = InMemoryStore()
+thread_id = str(uuid.uuid4())
+user_id = str(uuid.uuid4())
+config = {"configurable": {"thread_id": thread_id, "user_id": user_id}}
+
+
+master_builder = StateGraph(SupervisorOverallState)
+master_builder.add_node("decomposer", task_decompose_node, retry_policy=RetryPolicy(), cache_policy=CachePolicy(ttl=120))
+master_builder.add_edge(START, "decomposer")
+master_builder.add_edge("decomposer", END)
+master_graph = master_builder.compile(checkpointer=checkpointer, store=in_memory_store)
+
+
+# Show the agent
+from IPython.display import Image, display
+display(Image(master_graph.get_graph(xray=True).draw_mermaid_png()))
 
 
 
 
-master_graph = StateGraph(SupervisorOverallState)
 
-master_graph.add_edge(START, "start_point")
+result = master_graph.invoke({"messages": [{"type": "human", "content": "What the fuck is wrong with this world?"}]}, config)
 
-
-
-
-##https://docs.langchain.com/oss/python/langchain/short-term-memory#pre-model-hook
-##https://langchain-ai.github.io/langgraph/how-tos/create-react-agent-manage-message-history/
-supervisor = create_supervisor(
-    agents=[sql_agent, rag_agent, web_search_agent],
-    model=llm,
-    pre_model_hook=[planner_agent],
-    prompt=(router_system_prompt_template)
-).compile()
-
-
-for chunk in supervisor.stream(
-    {
-        "messages": [
-            {
-                "role": "user",
-                "content": ""
-            }
-        ]
-    }
-):
-    print(chunk)
-    print("\n")
+master_graph.get_state(config).metadata ##'user_id': 'ab815cde-4970-4201-a897-d1da5ad8d3fa'
+master_graph.get_state(config).parent_config ##'checkpoint_id': '1f0b488d-71d6-63b7-8003-17876c44f6a3'
+master_graph.get_state(config).values
+list(master_graph.get_state_history(config))
+thread_config = {"configurable": {"thread_id": thread_id}}
+# user_config = {"configurable": {"user_id": user_id}} ##thread_id 무조건 있어야 함 
+# master_graph.get_state(thread_config)
