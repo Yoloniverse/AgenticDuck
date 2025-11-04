@@ -23,6 +23,7 @@ git checkout <내브린치명>
 
 git merge main
 
-사실 "오리는 날수있다."는 말은 거짓말이다.
+ollama를 도커에서 gpu를 사용 할 수 있도록 올리기 위해서는 다음을 CLI에서 실행한다.
+docker run -d --gpus all -v ollama:/root/.ollama -p 11434:11434 --name ollama ollama/ollama
 
 

@@ -21,15 +21,24 @@ from langchain_core.runnables import RunnableConfig
 from langchain.agents import create_agent
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.tools import tool
+from langchain.agents import create_agent
+
 
 
 from typing import TypedDict, List, Annotated, Any
 import sqlite3
 from dotenv import load_dotenv
-from prompts import planner_system_prompt_template, router_system_prompt_template, repeat_refined_query_system_prompt_template
 import os
 import uuid
 import json
+import pickle
+import logging
+import operator
+
+##custom
+from prompts import planner_system_prompt_template, router_system_prompt_template, repeat_refined_query_system_prompt_template
+from toolings import taviliy_web_search_tool
+
 # ## should change username, passcode, host, port, database names to real ones.
 # DB_URI = "postgresql://user:password@localhost:5432/dbname" 
 # checkpointer = PostgresSaver.from_conn_string(DB_URI)
@@ -37,6 +46,28 @@ import json
 
 load_dotenv()
 print("LANGGRAPH_AES_KEY =", os.getenv("LANGGRAPH_AES_KEY"))
+
+
+######################################################################
+#                             Save Log                               #
+######################################################################
+os.makedirs('./logs', exist_ok=True)
+logger = logging.getLogger("MultiAgents")
+logger.setLevel(logging.INFO)
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+log_max_size = 1024000
+log_file_count = 3
+log_fileHandler = logging.handlers.RotatingFileHandler(
+        filename=f"./logs/multi_agents_main.log",
+        maxBytes=log_max_size,
+        backupCount=log_file_count,
+        mode='a')
+
+log_fileHandler.setFormatter(formatter)
+logger.handlers.clear()
+logger.addHandler(log_fileHandler)
+logger.propagate = False
+
 
 
 
@@ -87,14 +118,9 @@ refinery_llm_chain = repeat_refined_query_system_prompt_template | llm
 # result = refinery_llm_chain.invoke({"query": [{"type": "human", "content": "What the fuck is wrong with this world?"}]})
 
 
-
-
 class routerOutputState(TypedDict):  
     agent: str
     task: plannerOutputState
-
-
-
 
 
 
@@ -110,11 +136,26 @@ class SupervisorOverallState(TypedDict):
     priority: int
     routing_results: List[routerOutputState]
     refined_statement: str
+    tool_calling: Annotated[str, operator.add]
+    tool_callings: List[str]
     final_statement: str
+
+tool_calling_chain = create_agent(
+    model=llm,
+    tools=[taviliy_web_search_tool],
+    system_prompt="You are a helpful assistant to choose a tool for a task.",
+)
+# dir(tool_agent)
+# tools = [taviliy_web_search_tool]
+# test_tools = llm.bind_tools(tools)
+# tool_agent_chain = tool_agent_prompt_template | llm.bind_tools(tools)
+
+# tool_agent
 
 
 
 async def task_decompose_node(state: UserInputState) -> PlannerTasksState: ##-> PlannerTasksState: 이렇게 output format을 지정하지 않으면, 그에 맞게 및의 return decomposed_result를 {"tasks": decomposed_result} 으로 지정한다
+    print(f"task_decompose_node executed: {task_decompose_node}")
     # print(f"User input message: {state['messages']}")
     # print(f"User input message type: {type(state['messages'])}") ##User input message type: <class 'list'>
     decomposed_result = await planner_llm_chain.ainvoke({"messages": [{"type": "human", "content": state['messages'][-1].content}]})
@@ -125,6 +166,7 @@ async def task_decompose_node(state: UserInputState) -> PlannerTasksState: ##-> 
 
 
 async def statement_refinery(state: UserInputState) -> SupervisorOverallState:
+    print(f"statement_refinery executed: {statement_refinery}")
     refined_statement = await refinery_llm_chain.ainvoke({"messages": [{"type": "human", "content": state['messages'][-1].content}]})
     print(f"refined_statement: {refined_statement}")
     # return {"refined_statement": refined_statement}
@@ -135,6 +177,7 @@ async def subtask_router_worker(state: plannerOutputState) -> routerOutputState:
     """
     Async worker that computes only SINGLE task
     """
+    print(f"subtask_router_worker executed: {subtask_router_worker}")
 
     ##여기의 state는 리스트는 하나하나 개별 값들 
     # print(state)
@@ -160,7 +203,7 @@ async def parallel_task_routing_node(state: PlannerTasksState) -> SupervisorOver
     """
     # print(f"state structure: {state}") ##{'tasks': [{'task_id': 'task_1', 'task_description': 'Research the German job market (industries, cities with job opportunities, salary trends)', 'dependencies': [], 'priority': 1}, {'task_id': 'task_2', 'task_description': 'Create a tailored resume and cover letter compliant with German standards', 'dependencies': ['task_1'], 'priority': 2}, {'task_id': 'task_3', 'task_description': 'Prepare for job interviews (research common German interview practices, practice answers)', 'dependencies': ['task_2'], 'priority': 3}, {'task_id': 'task_4', 'task_description': 'Network with professionals in target industries (LinkedIn, local German professional groups)', 'dependencies': ['task_1', 'task_2'], 'priority': 4}, {'task_id': 'task_5', 'task_description': 'Apply for work visa (research required documents, application process, processing times)', 'dependencies': ['task_1'], 'priority': 5}, {'task_id': 'task_6', 'task_description': 'Utilize German job portals (StepStone, Indeed, Xing, local company career pages)', 'dependencies': ['task_1', 'task_2'], 'priority': 6}, {'task_id': 'task_7', 'task_description': 'Develop German language skills (certifications like Goethe Institute, language practice)', 'dependencies': ['task_1'], 'priority': 7}]}
     # print(f"state structure: {state['tasks']}") ##[{'task_id': 'task_1', 'task_description': 'Research the German job market (industries, cities with job opportunities, salary trends)', 'dependencies': [], 'priority': 1}, {'task_id': 'task_2', 'task_description': 'Create a tailored resume and cover letter compliant with German standards', 'dependencies': ['task_1'], 'priority': 2}, {'task_id': 'task_3', 'task_description': 'Prepare for job interviews (research common German interview practices, practice answers)', 'dependencies': ['task_2'], 'priority': 3}, {'task_id': 'task_4', 'task_description': 'Network with professionals in target industries (LinkedIn, local German professional groups)', 'dependencies': ['task_1', 'task_2'], 'priority': 4}, {'task_id': 'task_5', 'task_description': 'Apply for work visa (research required documents, application process, processing times)', 'dependencies': ['task_1'], 'priority': 5}, {'task_id': 'task_6', 'task_description': 'Utilize German job portals (StepStone, Indeed, Xing, local company career pages)', 'dependencies': ['task_1', 'task_2'], 'priority': 6}, {'task_id': 'task_7', 'task_description': 'Develop German language skills (certifications like Goethe Institute, language practice)', 'dependencies': ['task_1'], 'priority': 7}]
-
+    print(f"parallel_task_routing_node executed: {parallel_task_routing_node}")
     if not state['tasks']:
         print("No tasks given!!")
 
@@ -187,15 +230,61 @@ async def parallel_task_routing_node(state: PlannerTasksState) -> SupervisorOver
 # print("\n\n".join(state_list))
 
 
-import pickle
+# tool_calling_chain
+
+
+
+
+async def subtask_tool_calling_worker(state: SupervisorOverallState) -> SupervisorOverallState:
+    """
+    Async worker that computes only SINGLE tool calling task
+    """
+    print(f"subtask_tool_calling_worker executed: {subtask_tool_calling_worker}")
+    with open("/home/sdt/Workspace/mvai/AgenticRAG/subtask_tool_calling_worker.pkl", "wb") as f:
+        pickle.dump(state, f)
+
+    task_description = state['task']['task_description']
+    subtask_tool_calling_worker_result = await tool_calling_chain.ainvoke({"messages": [{"type": "human", "content": task_description}]})
+
+    return {"tool_calling": subtask_tool_calling_worker_result}
+
+
+async def tool_calling(state: SupervisorOverallState) -> SupervisorOverallState:
+    print(f"tool_calling executed: {tool_calling}")
+    with open("/home/sdt/Workspace/mvai/AgenticRAG/tool_calling.pkl", "wb") as f:
+        pickle.dump(state, f)
+    print(f"tool_calling executed: {tool_calling}")
+    subtask_tool_calling_worker_runnable = RunnableLambda(subtask_tool_calling_worker)
+    subtask_tool_calling_worker_results = await subtask_tool_calling_worker_runnable.abatch(state['routing_results']) ##모든 태스크들이 list로 들어감 
+
+    print(f"subtask_tool_calling_worker_results: {subtask_tool_calling_worker_results}")
+    # return {"refined_statement": refined_statement}
+    return {"tool_callings": subtask_tool_calling_worker_results}
+
+
+# def result_concatnater(state: SupervisorOverallState) -> SupervisorOverallState:
+#     state_list = []
+#     # state_list2 = []
+#     state_list.append(state['refined_statement'].content)
+#     state_list.append(str(state["routing_results"]))
+#     with open("/home/sdt/Workspace/mvai/AgenticRAG/test.pkl", "wb") as f:
+#         pickle.dump(state_list, f)
+#     print(f"state_list: {state_list}")
+#     # state_list2.append(state['refined_statement']['messages'])
+#     # state_list2.append(str(state["routing_results"]))
+#     final_statement = "\n\n".join(state_list)
+#     print(f"final_statement: {final_statement}")
+#     return {"final_statement": final_statement}
+
 
 
 def result_concatnater(state: SupervisorOverallState) -> SupervisorOverallState:
+    print(f"result_concatnater executed: {result_concatnater}")
     state_list = []
     # state_list2 = []
     state_list.append(state['refined_statement'].content)
-    state_list.append(str(state["routing_results"]))
-    with open("/home/sdt/Workspace/mvai/AgenticRAG/test.pkl", "wb") as f:
+    state_list.append(str(state["tool_callings"]))
+    with open("/home/sdt/Workspace/mvai/AgenticRAG/result_concatnater.pkl", "wb") as f:
         pickle.dump(state_list, f)
     print(f"state_list: {state_list}")
     # state_list2.append(state['refined_statement']['messages'])
@@ -215,6 +304,14 @@ def result_concatnater(state: SupervisorOverallState) -> SupervisorOverallState:
 # loaded_data[1]
 # "\n\n".join(loaded_data)
 
+
+# with open("/home/sdt/Workspace/mvai/AgenticRAG/subtask_tool_calling_worker.pkl", 'rb') as f:
+#     subtask_tool_calling_worker_data = pickle.load(f)
+# subtask_tool_calling_worker_data['task']['task_description']
+# with open("/home/sdt/Workspace/mvai/AgenticRAG/tool_calling.pkl", 'rb') as f:
+#     tool_calling_data = pickle.load(f)
+
+# tool_calling_data['routing_results'][0]['agent']
 # task_agents = []
 
 
@@ -279,7 +376,9 @@ config = {"configurable": {"thread_id": thread_id, "user_id": user_id}}
 parallel_builder = StateGraph(SupervisorOverallState)
 parallel_builder.add_node("decomposer", task_decompose_node, retry_policy=RetryPolicy(), cache_policy=CachePolicy(ttl=120))
 parallel_builder.add_node("parallel_router", parallel_task_routing_node, retry_policy=RetryPolicy(), cache_policy=CachePolicy(ttl=120))
+parallel_builder.add_node("tool_calling", tool_calling, retry_policy=RetryPolicy(), cache_policy=CachePolicy(ttl=120))
 parallel_builder.add_node("statement_refinery", statement_refinery, retry_policy=RetryPolicy(), cache_policy=CachePolicy(ttl=120))
+
 
 ## 서브그래프의 내부 흐름 정의
 parallel_builder.add_edge(START, "decomposer")
@@ -287,7 +386,8 @@ parallel_builder.add_edge(START, "statement_refinery")
 parallel_builder.add_edge("decomposer", "parallel_router")
 
 ## 두 병렬 브랜치가 모두 서브그래프의 END를 가리키도록 함
-parallel_builder.add_edge("parallel_router", END)
+parallel_builder.add_edge("parallel_router", "tool_calling")
+parallel_builder.add_edge("tool_calling", END)
 parallel_builder.add_edge("statement_refinery", END)
 
 
@@ -342,6 +442,20 @@ display(Image(master_graph.get_graph(xray=True).draw_mermaid_png()))
 
 
 result = await master_graph.ainvoke({"messages": [{"type": "human", "content": "What should I do to find a job in Germany?"}]}, config)
+
+
+with open("/home/sdt/Workspace/mvai/AgenticRAG/final_result.pkl", "wb") as f:
+    pickle.dump(result, f)
+
+
+
+with open("/home/sdt/Workspace/mvai/AgenticRAG/final_result.pkl", 'rb') as f:
+    final_result = pickle.load(f)
+
+final_result['messages']
+final_result['tasks']
+final_result['tool_callings']
+final_result['tool_callings'][0]['tool_calling']['messages'][3]
 
 
 type(result)
