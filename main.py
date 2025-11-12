@@ -24,8 +24,8 @@ from langchain_core.tools import tool
 from langchain.agents import create_agent
 
 
-
-from typing import TypedDict, List, Annotated, Any
+from pydantic.v1 import BaseModel, Field
+from typing import TypedDict, List, Annotated, Any, Literal, Dict
 import sqlite3
 from dotenv import load_dotenv
 import os
@@ -36,7 +36,7 @@ import logging
 import operator
 
 ##custom
-from prompts import planner_system_prompt_template, router_system_prompt_template, repeat_refined_query_system_prompt_template
+from prompts import planner_system_prompt_template, router_system_prompt_template, repeat_refined_query_system_prompt_template, intent_classification_prompt_template##, tool_calling_evaluator_prompt_template
 from toolings import taviliy_web_search_tool
 
 # ## should change username, passcode, host, port, database names to real ones.
@@ -90,7 +90,7 @@ llm = ChatOllama(model="qwen3:8b", base_url="http://127.0.0.1:11434")
  
 
 class UserInputState(TypedDict):  
-    messages: Annotated[List[BaseMessage], add_messages]
+    messages: Annotated[List[str], add_messages] ##유저 인풋
 
 class plannerOutputState(TypedDict):  
     task_id: str
@@ -106,12 +106,18 @@ planner_llm_chain = planner_system_prompt_template | llm.with_structured_output(
 # decomposed_result = planner_llm_chain.invoke({"messages": [{"type": "human", "content": "I dont know what to do to find a job in Singapore"}]} )
 # type(decomposed_result)
 
+class intentClassifyingState(TypedDict):
+    intent: str
+
+intent_classifier_llm_chain = intent_classification_prompt_template | llm.with_structured_output(intentClassifyingState)
+intent_classifier_llm_chain.invoke("I wanna know information on how to move to Australia")
 
 class QueryRefineryTasks(TypedDict):
     """
     Input: User's query text in list. UserInputState -> messages: Annotated[List[BaseMessage], add_messages]
     """
     refined_statement: str
+
 # refinery_llm_chain = repeat_refined_query_system_prompt_template | llm.with_structured_output(QueryRefineryTasks)
 refinery_llm_chain = repeat_refined_query_system_prompt_template | llm
 # result = refinery_llm_chain.invoke({"query": [{"type": "human", "content": "I wanna know how to go to Singapore from KL in Malaysia"}]})
@@ -122,12 +128,17 @@ class routerOutputState(TypedDict):
     agent: str
     task: plannerOutputState
 
-
-
 router_llm_chain = router_system_prompt_template | llm.with_structured_output(routerOutputState)
 
+
+# class taskEvalState(TypedDict):  
+#     each_task_evaluation: Literal["good", "bad"]
+#     # task: plannerOutputState
+    
+# router_llm_chain = router_system_prompt_template | llm.with_structured_output(taskEvalState)
+
 class SupervisorOverallState(TypedDict):
-    messages: Annotated[List[BaseMessage], add_messages]
+    messages: Annotated[List[str], add_messages]
     user_question: str
     tasks: List[plannerOutputState]
     task_id: str
@@ -136,21 +147,26 @@ class SupervisorOverallState(TypedDict):
     priority: int
     routing_results: List[routerOutputState]
     refined_statement: str
-    tool_calling: Annotated[str, operator.add]
-    tool_callings: List[str]
+    tool_calling_result: Annotated[str, operator.add]
+    tool_callings_result: List[Dict] ##List[str]
     final_statement: str
+    tool_calling_eval: Literal["good", "bad"]
+
+
 
 tool_calling_chain = create_agent(
     model=llm,
     tools=[taviliy_web_search_tool],
     system_prompt="You are a helpful assistant to choose a tool for a task.",
 )
-# dir(tool_agent)
-# tools = [taviliy_web_search_tool]
-# test_tools = llm.bind_tools(tools)
-# tool_agent_chain = tool_agent_prompt_template | llm.bind_tools(tools)
 
-# tool_agent
+# subtask_tool_calling_worker_result = await tool_calling_chain.ainvoke({"messages": [{"type": "human", "content": "Please tell me the price of Seoul average apartment price"}]})
+# subtask_tool_calling_worker_result['messages'][1].tool_calls
+# subtask_tool_calling_worker_result['messages'][2]
+# subtask_tool_calling_worker_result['messages'][3]
+
+
+
 
 
 
@@ -184,7 +200,9 @@ async def subtask_router_worker(state: plannerOutputState) -> routerOutputState:
     # print(f"plannerOutputState type: {type(state)}") ##plannerOutputState type: <class 'dict'>
     # print(f"plannerOutputState: {state}") ##{'task_id': 'task_2', 'task_description': 'Update and tailor resume/cv for German job applications', 'dependencies': ['task_1'], 'priority': 2}
     task = state['task_description']
+    # print(f"task hh: {task}")
     router_for_individual_task_result = await router_llm_chain.ainvoke({"messages": [{"type": "human", "content": task}]})
+    # print(f"router hh: {router_for_individual_task_result}")
     # print(f"subtask_router_worker: {router_for_individual_task_result}") ## {'agent': 'research_supervisor', 'task': {'task_id': 'networking_professionals', 'task_description': 'Identify and connect with professionals in target industries via LinkedIn and local German professional groups', 'dependencies': [], 'priority': 1}}
     # print(f"subtask_router_worker: {type(router_for_individual_task_result)}") ## subtask_router_worker: <class 'dict'>
     # result = router_llm_chain.invoke({"messages": [{"type": "human", "content": task}]})
@@ -240,18 +258,18 @@ async def subtask_tool_calling_worker(state: SupervisorOverallState) -> Supervis
     Async worker that computes only SINGLE tool calling task
     """
     print(f"subtask_tool_calling_worker executed: {subtask_tool_calling_worker}")
-    with open("/home/sdt/Workspace/mvai/AgenticRAG/subtask_tool_calling_worker.pkl", "wb") as f:
+    with open("/home/sdt/Workspace/mvai/AgenticRAG/subtask_tool_calling_worker_result.pkl", "wb") as f:
         pickle.dump(state, f)
 
     task_description = state['task']['task_description']
     subtask_tool_calling_worker_result = await tool_calling_chain.ainvoke({"messages": [{"type": "human", "content": task_description}]})
 
-    return {"tool_calling": subtask_tool_calling_worker_result}
+    return {"tool_calling_result": subtask_tool_calling_worker_result}
 
 
 async def tool_calling(state: SupervisorOverallState) -> SupervisorOverallState:
     print(f"tool_calling executed: {tool_calling}")
-    with open("/home/sdt/Workspace/mvai/AgenticRAG/tool_calling.pkl", "wb") as f:
+    with open("/home/sdt/Workspace/mvai/AgenticRAG/tool_calling_result.pkl", "wb") as f:
         pickle.dump(state, f)
     print(f"tool_calling executed: {tool_calling}")
     subtask_tool_calling_worker_runnable = RunnableLambda(subtask_tool_calling_worker)
@@ -259,7 +277,92 @@ async def tool_calling(state: SupervisorOverallState) -> SupervisorOverallState:
 
     print(f"subtask_tool_calling_worker_results: {subtask_tool_calling_worker_results}")
     # return {"refined_statement": refined_statement}
-    return {"tool_callings": subtask_tool_calling_worker_results}
+    return {"tool_callings_result": subtask_tool_calling_worker_results}
+
+
+
+async def refine_results_node(state: SupervisorOverallState) -> SupervisorOverallState:
+    # 1. 이전 노드에서 생성된 '결과 리스트'를 가져옵니다.
+    tool_results_list = state['tool_callings_result'] 
+    
+    # 2. 이 리스트의 '각 항목'을 입력으로 삼아 abatch를 호출합니다.
+    # (refine_chain이 개별 항목을 처리하는 Runnable이라고 가정)
+    refined_results = await refine_chain.abatch(tool_results_list)
+    
+    return {"refined_results": refined_results}
+
+
+class Evaluation(BaseModel):
+    evaluation: Literal["good", "bad"] = Field(description="The evaluation result, either 'good' or 'bad'")
+
+# tool_calling_evaluator_llm_chain = tool_calling_evaluator_prompt_template | llm.with_structured_output(SupervisorOverallState)
+
+async def tool_calling_result_evaluator(state: SupervisorOverallState) -> Dict: ##Literal["good", "bad"]:
+    print("tool_calling_result_evaluator executed")
+    user_query = state['messages'][-1].content
+    tool_call_results_list = state['tool_callings_result']
+    tasks = state['tasks']
+    print(f"tasks: {tasks}")
+    # tasks_list = tasks.get('tasks', [])
+
+
+
+    tool_calling_evaluator_prompt_template = ChatPromptTemplate.from_messages([
+        ("system", """
+                    You are a precisely correct evaluator of tool calling result. You will check user's original query, 
+                    task description of a task derived from the user's query, and tool calling result based on task description.
+                    Your job is to check if tool calling result is appropriate to the user's query and the task description.
+                    If the result is appropriate, you MUST say good. If the result is not relevant and good enough, you MUST say bad. So basically you can choose only one answer from the list below:
+                    
+                    ["good", "bad"]
+
+
+                """),  
+        ("user", """
+
+        [User's original query]
+        {user_query}
+
+        [Task description for the tool calling]
+        {task_description}
+
+        [Tool calling result]
+        {tool_calling_result}
+
+
+        Tell me if the tool calling result is appropriate given user query and task description which is inferred from user query. 
+        """
+
+        
+        
+        
+        )  
+
+    ])
+    tool_calling_evaluator_llm_chain = tool_calling_evaluator_prompt_template | llm.with_structured_output(Evaluation)
+
+    list_len = len(tasks)
+    inputs_for_batch = []
+    for i in range(list_len):
+        inputs_for_batch.append({
+            "user_query": user_query,  # [상수] 모든 항목에 동일한 쿼리 삽입
+            "task_description": tasks[i]['task_description'], # [변수]
+            "tool_calling_result": tool_call_results_list[i]['tool_calling_result']['messages'][-1].content # [변수]
+        })
+        print(tool_call_results_list)
+
+    evaluation_results = await tool_calling_evaluator_llm_chain.abatch(inputs_for_batch)
+
+    # subtask_tool_calling_worker_result = await tool_calling_evaluator_llm_chain.ainvoke({"user_query": user_query,
+    #                                                                                      "tool_calling_result": tool_calling_result,
+    #                                                                                      "task_description": str(task_description)
+    #                                                                                     })
+
+    return {"tool_calling_eval": evaluation_results}
+
+
+
+
 
 
 # def result_concatnater(state: SupervisorOverallState) -> SupervisorOverallState:
@@ -296,6 +399,11 @@ def result_concatnater(state: SupervisorOverallState) -> SupervisorOverallState:
 
 # final_statement = [AIMessage(content='Let me rephrase your question!  \nYour goal is to find a job in Germany. What specific steps or actions should you take to make this happen?  \nIs my understanding correct?', additional_kwargs={}, response_metadata={'model': 'qwen3:8b', 'created_at': '2025-11-04T02:21:25.093749871Z', 'done': True, 'done_reason': 'stop', 'total_duration': 51657378989, 'load_duration': 65300947, 'prompt_eval_count': 233, 'prompt_eval_duration': 4709188084, 'eval_count': 421, 'eval_duration': 46754690176, 'model_name': 'qwen3:8b', 'model_provider': 'ollama'}, id='lc_run--5d9344b5-490d-4f88-ac00-2ee0bea906a9-0', usage_metadata={'input_tokens': 233, 'output_tokens': 421, 'total_tokens': 654}), "[{'agent': 'research_supervisor', 'task': {'task_id': 'research_german_job_market', 'task_description': 'Research the German job market and industry demand', 'dependencies': [], 'priority': 1}}, {'agent': 'research_supervisor', 'task': {'task_id': '1', 'task_description': 'Prepare a tailored resume and cover letter for German employers', 'dependencies': [], 'priority': 1}}, {'agent': 'research_supervisor', 'task': {'task_id': '1', 'task_description': 'Build professional network through LinkedIn and industry events', 'dependencies': [], 'priority': 1}}, {'agent': 'research_supervisor', 'task': {'task_id': 'JOB_PORTAL_APPLICATION_RESEARCH', 'task_description': 'Research and guide user on applying for jobs through German job portals like StepStone and Indeed Germany', 'dependencies': [], 'priority': 1}}, {'agent': 'research_supervisor', 'task': {'task_id': '1', 'task_description': 'Understand visa/work permit requirements for foreign workers', 'dependencies': [], 'priority': 1}}, {'agent': 'research_supervisor', 'task': {'task_id': '1', 'task_description': 'Prepare for job interviews with German cultural norms and language skills', 'dependencies': [], 'priority': 1}}, {'agent': 'research_supervisor', 'task': {'task_id': 'RELOCATION_LOGISTICS_GERMANy', 'task_description': 'Explore relocation logistics and cost of living in Germany', 'dependencies': [], 'priority': 1}}]"]
 
+
+#==========================================================================================================================================================
+#==========================================================================================================================================================
+#==========================================================================================================================================================
+
 # # 1. 'data.pkl' 파일을 'rb' 모드로 엽니다.
 # with open("/home/sdt/Workspace/mvai/AgenticRAG/test.pkl", 'rb') as f:
 #     # 2. 파일에서 데이터를 불러와(load) loaded_data 변수에 할당합니다.
@@ -310,6 +418,15 @@ def result_concatnater(state: SupervisorOverallState) -> SupervisorOverallState:
 # subtask_tool_calling_worker_data['task']['task_description']
 # with open("/home/sdt/Workspace/mvai/AgenticRAG/tool_calling.pkl", 'rb') as f:
 #     tool_calling_data = pickle.load(f)
+
+
+# with open("/home/sdt/Workspace/mvai/AgenticRAG/tool_calling_result.pkl", 'rb') as f:
+#     tool_calling_data = pickle.load(f)
+# tool_calling_data['tool_callings_result'][0]['tool_calling_result']['messages'][-1]
+# for i in tool_calling_data['tool_callings_result']:
+#     print(i)
+#     print("----")
+#     print("----")
 
 # tool_calling_data['routing_results'][0]['agent']
 # task_agents = []
@@ -330,6 +447,9 @@ def result_concatnater(state: SupervisorOverallState) -> SupervisorOverallState:
 # router_llm_chain.invoke('I wanna travel to latin america')
 # router_llm_chain.invoke('I wanna check facts in my documents')
 
+#==========================================================================================================================================================
+#==========================================================================================================================================================
+#==========================================================================================================================================================
 
 
 
@@ -367,8 +487,11 @@ def result_concatnater(state: SupervisorOverallState) -> SupervisorOverallState:
 
 
 in_memory_store = InMemoryStore()
-thread_id = str(uuid.uuid4())
-user_id = str(uuid.uuid4())
+thread_id = str(2)
+user_id = str(2)
+
+# thread_id = str(uuid.uuid4())
+# user_id = str(uuid.uuid4())
 config = {"configurable": {"thread_id": thread_id, "user_id": user_id}}
 
 
@@ -377,18 +500,25 @@ parallel_builder = StateGraph(SupervisorOverallState)
 parallel_builder.add_node("decomposer", task_decompose_node, retry_policy=RetryPolicy(), cache_policy=CachePolicy(ttl=120))
 parallel_builder.add_node("parallel_router", parallel_task_routing_node, retry_policy=RetryPolicy(), cache_policy=CachePolicy(ttl=120))
 parallel_builder.add_node("tool_calling", tool_calling, retry_policy=RetryPolicy(), cache_policy=CachePolicy(ttl=120))
-parallel_builder.add_node("statement_refinery", statement_refinery, retry_policy=RetryPolicy(), cache_policy=CachePolicy(ttl=120))
+# parallel_builder.add_node("tool_calling_evaluator", tool_calling_result_evaluator, retry_policy=RetryPolicy(), cache_policy=CachePolicy(ttl=120))
+"""
+평가자 노드 (evaluator_node): [핵심] 별도의 '평가용 LLM'을 사용하여, [사용자 원본 질문], [Tool 호출 내용], [Tool 실행 결과] 3가지를 보고 "이 결과가 유용한가?"를 판단하여 state를 업데이트합니다.
+"""
+# parallel_builder.add_node("statement_refinery", statement_refinery, retry_policy=RetryPolicy(), cache_policy=CachePolicy(ttl=120))
 
 
 ## 서브그래프의 내부 흐름 정의
 parallel_builder.add_edge(START, "decomposer")
-parallel_builder.add_edge(START, "statement_refinery")
+# parallel_builder.add_edge(START, "statement_refinery")
 parallel_builder.add_edge("decomposer", "parallel_router")
 
 ## 두 병렬 브랜치가 모두 서브그래프의 END를 가리키도록 함
 parallel_builder.add_edge("parallel_router", "tool_calling")
 parallel_builder.add_edge("tool_calling", END)
-parallel_builder.add_edge("statement_refinery", END)
+# parallel_builder.add_edge("tool_calling", "tool_calling_evaluator")
+# parallel_builder.add_edge("tool_calling_evaluator", END)
+# parallel_builder.add_conditional_edges("tool_calling_evaluator", path=tool_calling_result_evaluator, path_map={"bad": "tool_calling","good": END})
+# parallel_builder.add_edge("statement_refinery", END)
 
 
 parallel_graph = parallel_builder.compile()
@@ -401,47 +531,89 @@ master_builder = StateGraph(SupervisorOverallState)
 ## 서브그래프 자체를 'parallel_step'이라는 이름의 단일 노드로 추가
 master_builder.add_node("parallel_step", parallel_graph)
 ## 결과 취합 노드 추가
-master_builder.add_node("result_concatnater", result_concatnater, retry_policy=RetryPolicy(), cache_policy=CachePolicy(ttl=120))
+# master_builder.add_node("result_concatnater", result_concatnater, retry_policy=RetryPolicy(), cache_policy=CachePolicy(ttl=120))
 
 ## 메인 그래프는 이제 단순한 순차 흐름이 됨
 master_builder.set_entry_point("parallel_step")
-master_builder.add_edge("parallel_step", "result_concatnater")
-master_builder.add_edge("result_concatnater", END)
+master_builder.add_edge("parallel_step", END)
+# master_builder.add_edge("parallel_step", "result_concatnater")
+# master_builder.add_edge("result_concatnater", END)
 
 
 master_graph = master_builder.compile(checkpointer=checkpointer, store=in_memory_store)
 
 
+# in_memory_store
+# dir(checkpointer)
+# checkpointer.list(config=)
 
 
 
+"""
+########################섭그래프없이 테스트해보는 것 ########################
+"""
 
-# master_builder = StateGraph(SupervisorOverallState)
-# master_builder.add_node("decomposer", task_decompose_node, retry_policy=RetryPolicy(), cache_policy=CachePolicy(ttl=120))
-# master_builder.add_node("parallel_router", parallel_task_routing_node, retry_policy=RetryPolicy(), cache_policy=CachePolicy(ttl=120))
-# master_builder.add_node("statement_refinery", statement_refinery, retry_policy=RetryPolicy(), cache_policy=CachePolicy(ttl=120))
+
+master_builder = StateGraph(SupervisorOverallState)
+master_builder.add_node("decomposer", task_decompose_node, retry_policy=RetryPolicy(), cache_policy=CachePolicy(ttl=120))
+master_builder.add_node("parallel_router", parallel_task_routing_node, retry_policy=RetryPolicy(), cache_policy=CachePolicy(ttl=120))
+master_builder.add_node("tool_calling", tool_calling, retry_policy=RetryPolicy(), cache_policy=CachePolicy(ttl=120))
+master_builder.add_node("tool_calling_evaluator", tool_calling_result_evaluator, retry_policy=RetryPolicy(), cache_policy=CachePolicy(ttl=120))
 # master_builder.add_node("result_concatnater", result_concatnater, retry_policy=RetryPolicy(), cache_policy=CachePolicy(ttl=120))
 
 
-# master_builder.add_edge(START, "decomposer")
+master_builder.add_edge(START, "decomposer")
 # master_builder.add_edge(START, "statement_refinery")
-# master_builder.add_edge("decomposer", "parallel_router")
-# master_builder.add_edge("parallel_router", "result_concatnater")
+master_builder.add_edge("decomposer", "parallel_router")
+master_builder.add_edge("parallel_router", "tool_calling")
+master_builder.add_edge("tool_calling", "tool_calling_evaluator")
+master_builder.add_edge("tool_calling_evaluator", END)
 # master_builder.add_edge("statement_refinery", "result_concatnater")
 # master_builder.add_edge("result_concatnater", END)
 
 
-# master_graph = master_builder.compile(checkpointer=checkpointer, store=in_memory_store)
+master_graph = master_builder.compile(checkpointer=checkpointer, store=in_memory_store)
 
 
 # Show the agent
 from IPython.display import Image, display
 display(Image(master_graph.get_graph(xray=True).draw_mermaid_png()))
 
-
-
-
+from time import time
+start_time = time()
 result = await master_graph.ainvoke({"messages": [{"type": "human", "content": "What should I do to find a job in Germany?"}]}, config)
+finishe_time = time()
+time_taken = finishe_time - start_time
+print(f"{time_taken} seconds") ##99.43021845817566 seconds
+
+
+
+result.keys()
+result['messages']
+result['refined_statement']
+result['tasks'][0]['task_description']
+result['routing_results']
+result['tool_calling_result']
+result['tool_callings_result']
+result['tool_callings_result'][0]['tool_calling_result']['messages'][-1].content
+result['tasks']
+result.keys()
+result['routing_results'][0]['agent']
+
+result['messages']
+result['tasks']
+result['refined_statement']
+result['tool_callings_result'][0]['tool_calling_result']['messages'][-1].tool_calls
+result['tool_callings_result'][1]['tool_calling_result']['messages'][-1]
+result.keys()
+result['final_statement']
+zz = result['routing_results']
+result['tasks']
+result['tool_calling_result']
+
+
+type(result['tool_callings_result'][0])
+
 
 
 with open("/home/sdt/Workspace/mvai/AgenticRAG/final_result.pkl", "wb") as f:
@@ -452,10 +624,10 @@ with open("/home/sdt/Workspace/mvai/AgenticRAG/final_result.pkl", "wb") as f:
 with open("/home/sdt/Workspace/mvai/AgenticRAG/final_result.pkl", 'rb') as f:
     final_result = pickle.load(f)
 
-final_result['messages']
-final_result['tasks']
-final_result['tool_callings']
-final_result['tool_callings'][0]['tool_calling']['messages'][3]
+result['messages']
+result['tasks']
+result['tool_callings']
+result['tool_callings'][0]['tool_calling']['messages'][3]
 
 
 type(result)
