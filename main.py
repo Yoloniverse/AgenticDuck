@@ -23,7 +23,7 @@ from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.tools import tool
 from langchain.agents import create_agent
 
-
+from operator import add
 from pydantic.v1 import BaseModel, Field
 from typing import TypedDict, List, Annotated, Any, Literal, Dict
 import sqlite3
@@ -38,6 +38,7 @@ import operator
 ##custom
 from prompts import planner_system_prompt_template, router_system_prompt_template, repeat_refined_query_system_prompt_template, intent_classification_prompt_template##, tool_calling_evaluator_prompt_template
 from toolings import taviliy_web_search_tool
+import mcp_server_git
 
 # ## should change username, passcode, host, port, database names to real ones.
 # DB_URI = "postgresql://user:password@localhost:5432/dbname" 
@@ -92,14 +93,14 @@ llm = ChatOllama(model="qwen3:8b", base_url="http://127.0.0.1:11434")
 class UserInputState(TypedDict):  
     messages: Annotated[List[str], add_messages] ##유저 인풋
 
-class plannerOutputState(TypedDict):  
+class plannerSingleState(TypedDict):  
     task_id: str
     task_description: str
     dependencies: List[str]
     priority: int
 
 class PlannerTasksState(TypedDict):
-    tasks: List[plannerOutputState]
+    tasks: List[plannerSingleState]
 
 planner_llm_chain = planner_system_prompt_template | llm.with_structured_output(PlannerTasksState)
 # decomposed_result = planner_llm_chain.invoke("I wanna go to Italy. tell me how to go to italy and what to eat. And also tell me when the best seasons to visit is")
@@ -110,7 +111,7 @@ class intentClassifyingState(TypedDict):
     intent: str
 
 intent_classifier_llm_chain = intent_classification_prompt_template | llm.with_structured_output(intentClassifyingState)
-intent_classifier_llm_chain.invoke("I wanna know information on how to move to Australia")
+# intent_classifier_llm_chain.invoke("I wanna know information on how to move to Australia")
 
 class QueryRefineryTasks(TypedDict):
     """
@@ -121,37 +122,49 @@ class QueryRefineryTasks(TypedDict):
 # refinery_llm_chain = repeat_refined_query_system_prompt_template | llm.with_structured_output(QueryRefineryTasks)
 refinery_llm_chain = repeat_refined_query_system_prompt_template | llm
 # result = refinery_llm_chain.invoke({"query": [{"type": "human", "content": "I wanna know how to go to Singapore from KL in Malaysia"}]})
-# result = refinery_llm_chain.invoke({"query": [{"type": "human", "content": "What the fuck is wrong with this world?"}]})
+# result = refinery_llm_chain.invoke({"messages": [{"type": "human", "content": "What the fuck is wrong with this world?"}]})
+# result.content
 
-
-class routerOutputState(TypedDict):  
+class routerState(TypedDict):  
     agent: str
-    task: plannerOutputState
+    # task: plannerSingleState
 
-router_llm_chain = router_system_prompt_template | llm.with_structured_output(routerOutputState)
+router_llm_chain = router_system_prompt_template | llm.with_structured_output(routerState)
 
 
 # class taskEvalState(TypedDict):  
 #     each_task_evaluation: Literal["good", "bad"]
-#     # task: plannerOutputState
+#     # task: plannerSingleState
     
 # router_llm_chain = router_system_prompt_template | llm.with_structured_output(taskEvalState)
 
+
+
 class SupervisorOverallState(TypedDict):
     messages: Annotated[List[str], add_messages]
-    user_question: str
-    tasks: List[plannerOutputState]
-    task_id: str
-    task_description: str
-    dependencies: List[str]
-    priority: int
-    routing_results: List[routerOutputState]
+    # user_question: str
+    tasks: List[plannerSingleState]
+    agent: str
     refined_statement: str
-    tool_calling_result: Annotated[str, operator.add]
+    routing_results: List[routerState]
     tool_callings_result: List[Dict] ##List[str]
-    final_statement: str
     tool_calling_eval: Literal["good", "bad"]
+    # task_id: str
+    # task_description: str
+    # dependencies: List[str]
+    # priority: int
+    
+    
+    # # tool_calling_result: Annotated[str, operator.add]
+    
+    # final_statement: str
+    
 
+
+
+# result['tasks']
+# result['refined_statement']
+# result['routing_results']
 
 
 tool_calling_chain = create_agent(
@@ -170,7 +183,7 @@ tool_calling_chain = create_agent(
 
 
 
-async def task_decompose_node(state: UserInputState) -> PlannerTasksState: ##-> PlannerTasksState: 이렇게 output format을 지정하지 않으면, 그에 맞게 및의 return decomposed_result를 {"tasks": decomposed_result} 으로 지정한다
+async def task_decompose_node(state: UserInputState) -> SupervisorOverallState: ##-> PlannerTasksState: 이렇게 output format을 지정하지 않으면, 그에 맞게 및의 return decomposed_result를 {"tasks": decomposed_result} 으로 지정한다
     print(f"task_decompose_node executed: {task_decompose_node}")
     # print(f"User input message: {state['messages']}")
     # print(f"User input message type: {type(state['messages'])}") ##User input message type: <class 'list'>
@@ -178,7 +191,9 @@ async def task_decompose_node(state: UserInputState) -> PlannerTasksState: ##-> 
     # print(f"decomposed_result: {decomposed_result}") ##decomposed_result: {'tasks': [{'task_id': 'task_1', 'task_description': "Research Germany's job market trends and in-demand industries", 'dependencies': [], 'priority': 1}, {'task_id': 'task_2', 'task_description': 'Tailor resume and cover letter to German job market standards', 'dependencies': ['task_1'], 'priority': 2}, {'task_id': 'task_3', 'task_description': 'Learn German language proficiency (B1/C1 level recommended)', 'dependencies': ['task_1'], 'priority': 3}, {'task_id': 'task_4', 'task_description': 'Create LinkedIn profile optimized for German job search', 'dependencies': ['task_2', 'task_3'], 'priority': 4}, {'task_id': 'task_5', 'task_description': 'Apply for jobs through German job portals (e.g., StepStone, Indeed, Monster)', 'dependencies': ['task_4'], 'priority': 5}, {'task_id': 'task_6', 'task_description': 'Prepare for job interviews with German cultural norms and language practice', 'dependencies': ['task_5'], 'priority': 6}, {'task_id': 'task_7', 'task_description': 'Research visa/work permit requirements for foreign nationals', 'dependencies': ['task_1'], 'priority': 7}, {'task_id': 'task_8', 'task_description': 'Plan relocation logistics (housing, banking, insurance)', 'dependencies': ['task_7'], 'priority': 8}, {'task_id': 'task_9', 'task_description': 'Consider hiring recruitment agency for specialized roles', 'dependencies': ['task_5'], 'priority': 9}]}
     # print(f"Individual decomposed_result type: {type(decomposed_result['tasks'][0])}") 
     # print(f"decomposed_result type: {type(decomposed_result)}") ##decomposed_result type: <class 'dict'>
-    return decomposed_result
+    # print(f"decom: {decomposed_result}")
+    return decomposed_result ##decomposed_result가 이미 tasks: List[plannerSingleState] 형태를 가지고 있기 때문에 {'tasks': decomposed_result} 로 쓰지 않는다.
+
 
 
 async def statement_refinery(state: UserInputState) -> SupervisorOverallState:
@@ -186,30 +201,35 @@ async def statement_refinery(state: UserInputState) -> SupervisorOverallState:
     refined_statement = await refinery_llm_chain.ainvoke({"messages": [{"type": "human", "content": state['messages'][-1].content}]})
     print(f"refined_statement: {refined_statement}")
     # return {"refined_statement": refined_statement}
-    return {"refined_statement": refined_statement}
+    return {"refined_statement": refined_statement.content}
 
 
-async def subtask_router_worker(state: plannerOutputState) -> routerOutputState:
+async def subtask_router_worker(state: plannerSingleState) -> SupervisorOverallState:
     """
     Async worker that computes only SINGLE task
     """
     print(f"subtask_router_worker executed: {subtask_router_worker}")
-
+    # print(f"hereeee: {state}")
     ##여기의 state는 리스트는 하나하나 개별 값들 
     # print(state)
-    # print(f"plannerOutputState type: {type(state)}") ##plannerOutputState type: <class 'dict'>
-    # print(f"plannerOutputState: {state}") ##{'task_id': 'task_2', 'task_description': 'Update and tailor resume/cv for German job applications', 'dependencies': ['task_1'], 'priority': 2}
-    task = state['task_description']
+    # print(f"plannerSingleState type: {type(state)}") ##plannerSingleState type: <class 'dict'>
+    # print(f"plannerSingleState: {state}") ##{'task_id': 'task_2', 'task_description': 'Update and tailor resume/cv for German job applications', 'dependencies': ['task_1'], 'priority': 2}
+    task = state['task_description'] ## state = tasks의 각각의 태스크
     # print(f"task hh: {task}")
-    router_for_individual_task_result = await router_llm_chain.ainvoke({"messages": [{"type": "human", "content": task}]})
+    router_for_individual_task_result = await router_llm_chain.ainvoke({"messages": [{"type": "human", "content": task}]}) ##{'agent': 'research_supervisor'} 이런 형태
     # print(f"router hh: {router_for_individual_task_result}")
     # print(f"subtask_router_worker: {router_for_individual_task_result}") ## {'agent': 'research_supervisor', 'task': {'task_id': 'networking_professionals', 'task_description': 'Identify and connect with professionals in target industries via LinkedIn and local German professional groups', 'dependencies': [], 'priority': 1}}
     # print(f"subtask_router_worker: {type(router_for_individual_task_result)}") ## subtask_router_worker: <class 'dict'>
     # result = router_llm_chain.invoke({"messages": [{"type": "human", "content": task}]})
     # result = f"[Execution Result for: '{desc}']"
     # print(f"  < (Async) 태스크 완료: '{desc}'")
-    # return {"routerOutputState": result}
-    return router_for_individual_task_result
+    # return {"routerState": result}
+    # return router_for_individual_task_result ##router_for_individual_task_result가 이미 {'agent': 'research_supervisor'} 이런 형태이기 때문에 그냥 쓴다.
+    
+    router_task_result = {"agent": router_for_individual_task_result['agent'], "task": state}
+    return router_task_result 
+
+
 
 # subtask_router_worker = {'agent': 'research_supervisor', 'task': {'task_id': 'networking_professionals', 'task_description': 'Identify and connect with professionals in target industries via LinkedIn and local German professional groups', 'dependencies': [], 'priority': 1}}
 # type(subtask_router_worker)
@@ -233,7 +253,49 @@ async def parallel_task_routing_node(state: PlannerTasksState) -> SupervisorOver
     # print(f"parallel_task_routing_node final result: {subtask_routing_results}") ##parallel_task_routing_node final result: [{'agent': 'research_supervisor', 'task': {'task_id': 'research_german_job_market', 'task_description': 'Research the German job market, including in-demand industries and required qualifications', 'dependencies': [], 'priority': 1}}, {'agent': 'research_supervisor', 'task': {'task_id': 'resume_cover_letter_german_standard', 'task_description': 'Create a tailored resume and cover letter according to German standards', 'dependencies': [], 'priority': 1}}, {'agent': 'research_supervisor', 'task': {'task_id': 'networking_strategy_research', 'task_description': 'Conduct research on effective networking strategies using LinkedIn and German job portals to connect with industry professionals', 'dependencies': [], 'priority': 1}}, {'agent': 'research_supervisor', 'task': {'task_id': 'GERMAN_JOB_COMMUNICATION', 'task_description': 'Provide resources and guidance for learning basic German language skills focused on job applications and workplace communication scenarios.', 'dependencies': [], 'priority': 1}}, {'agent': 'research_supervisor', 'task': {'task_id': 'job_application_guidance', 'task_description': 'Provide step-by-step guidance on applying for jobs through German job portals (StepStone, Indeed Germany) and company career pages', 'dependencies': [], 'priority': 1}}, {'agent': 'research_supervisor', 'task': {'task_id': 'interview_preparation_german_employers', 'task_description': 'Research cultural norms, common interview questions, visa requirements, and company backgrounds for German employers to prepare effective virtual/in-person interviews', 'dependencies': [], 'priority': 1}}, {'agent': 'research_supervisor', 'task': {'task_id': '1', 'task_description': 'Research visa/work permit requirements for foreign professionals in Germany', 'dependencies': [], 'priority': 1}}, {'agent': 'research_supervisor', 'task': {'task_id': '1', 'task_description': 'Identify and research potential employers in target industries in Germany', 'dependencies': [], 'priority': 1}}, {'agent': 'research_supervisor', 'task': {'task_id': 'evaluate_relocation_costs_housing_quality_of_life_germany', 'task_description': 'Evaluate relocation costs, housing options, and quality of life in Germany', 'dependencies': [], 'priority': 1}}]
 
     # results = subtask_worker_runnable.batch(decomposed_result['tasks'])
-    return {"routing_results": subtask_routing_results}
+    return {"routing_results": subtask_routing_results} ## agent와 task 값이 같이 있는 List[Dict]
+    """ 
+    routing_results -> 
+    [{'agent': 'research_supervisor'},
+    {'agent': 'research_supervisor'},
+    {'agent': 'research_supervisor'},
+    {'agent': 'research_supervisor'},
+    {'agent': 'research_supervisor'},
+    {'agent': 'research_supervisor'},
+    {'agent': 'research_supervisor'},
+    {'agent': 'research_supervisor'}]
+    """
+    """
+    [{'task_id': 'task_1',
+    'task_description': 'Research the job market in Germany (industry trends, in-demand roles, salary ranges)',
+    'dependencies': [],
+    'priority': 1},
+    {'task_id': 'task_2',
+    'task_description': 'Tailor resume and cover letter to German job market standards',
+    'dependencies': ['task_1'],
+    'priority': 2},
+    {'task_id': 'task_3',
+    'task_description': 'Check visa/work permit requirements for foreign workers in Germany',
+    'dependencies': ['task_1'],
+    'priority': 3},
+    {'task_id': 'task_4',
+    'task_description': 'Network with professionals in target industries (LinkedIn, industry events, local communities)',
+    'dependencies': ['task_1', 'task_2'],
+    'priority': 4},
+    {'task_id': 'task_5',
+    'task_description': 'Apply for jobs via German job portals (Indeed, StepStone, LinkedIn, Xing)',
+    'dependencies': ['task_2', 'task_3', 'task_4'],
+    'priority': 5},
+    {'task_id': 'task_6',
+    'task_description': 'Prepare for job interviews (common questions, cultural norms, technical assessments)',
+    'dependencies': ['task_5'],
+    'priority': 6},
+    {'task_id': 'task_7',
+    'task_description': 'Evaluate language skills (German proficiency for specific roles)',
+    'dependencies': ['task_1'],
+    'priority': 7}]
+    """
+
 
 
 # state_structure = {'tasks': [{'task_id': 'task_1', 'task_description': 'Research the German job market (industries, cities with job opportunities, salary trends)', 'dependencies': [], 'priority': 1}, {'task_id': 'task_2', 'task_description': 'Create a tailored resume and cover letter compliant with German standards', 'dependencies': ['task_1'], 'priority': 2}, {'task_id': 'task_3', 'task_description': 'Prepare for job interviews (research common German interview practices, practice answers)', 'dependencies': ['task_2'], 'priority': 3}, {'task_id': 'task_4', 'task_description': 'Network with professionals in target industries (LinkedIn, local German professional groups)', 'dependencies': ['task_1', 'task_2'], 'priority': 4}, {'task_id': 'task_5', 'task_description': 'Apply for work visa (research required documents, application process, processing times)', 'dependencies': ['task_1'], 'priority': 5}, {'task_id': 'task_6', 'task_description': 'Utilize German job portals (StepStone, Indeed, Xing, local company career pages)', 'dependencies': ['task_1', 'task_2'], 'priority': 6}, {'task_id': 'task_7', 'task_description': 'Develop German language skills (certifications like Goethe Institute, language practice)', 'dependencies': ['task_1'], 'priority': 7}]}
@@ -246,10 +308,7 @@ async def parallel_task_routing_node(state: PlannerTasksState) -> SupervisorOver
 # state_list.append('I am fine and you?')
 # from pprint import pprint
 # print("\n\n".join(state_list))
-
-
 # tool_calling_chain
-
 
 
 
@@ -261,17 +320,18 @@ async def subtask_tool_calling_worker(state: SupervisorOverallState) -> Supervis
     with open("/home/sdt/Workspace/mvai/AgenticRAG/subtask_tool_calling_worker_result.pkl", "wb") as f:
         pickle.dump(state, f)
 
-    task_description = state['task']['task_description']
+    task_description = state['task']['task_description'] ##각각의 individual tasks
     subtask_tool_calling_worker_result = await tool_calling_chain.ainvoke({"messages": [{"type": "human", "content": task_description}]})
-
-    return {"tool_calling_result": subtask_tool_calling_worker_result}
+    tool_call_final_result = subtask_tool_calling_worker_result['messages'][-1].content
+    # print(tool_call_final_result)
+    return tool_call_final_result
 
 
 async def tool_calling(state: SupervisorOverallState) -> SupervisorOverallState:
     print(f"tool_calling executed: {tool_calling}")
     with open("/home/sdt/Workspace/mvai/AgenticRAG/tool_calling_result.pkl", "wb") as f:
         pickle.dump(state, f)
-    print(f"tool_calling executed: {tool_calling}")
+    # print(f"tool_calling executed: {tool_calling}")
     subtask_tool_calling_worker_runnable = RunnableLambda(subtask_tool_calling_worker)
     subtask_tool_calling_worker_results = await subtask_tool_calling_worker_runnable.abatch(state['routing_results']) ##모든 태스크들이 list로 들어감 
 
@@ -281,15 +341,15 @@ async def tool_calling(state: SupervisorOverallState) -> SupervisorOverallState:
 
 
 
-async def refine_results_node(state: SupervisorOverallState) -> SupervisorOverallState:
-    # 1. 이전 노드에서 생성된 '결과 리스트'를 가져옵니다.
-    tool_results_list = state['tool_callings_result'] 
+# async def refine_results_node(state: SupervisorOverallState) -> SupervisorOverallState:
+#     # 1. 이전 노드에서 생성된 '결과 리스트'를 가져옵니다.
+#     tool_results_list = state['tool_callings_result'] 
     
-    # 2. 이 리스트의 '각 항목'을 입력으로 삼아 abatch를 호출합니다.
-    # (refine_chain이 개별 항목을 처리하는 Runnable이라고 가정)
-    refined_results = await refine_chain.abatch(tool_results_list)
+#     # 2. 이 리스트의 '각 항목'을 입력으로 삼아 abatch를 호출합니다.
+#     # (refine_chain이 개별 항목을 처리하는 Runnable이라고 가정)
+#     refined_results = await refine_chain.abatch(tool_results_list)
     
-    return {"refined_results": refined_results}
+#     return {"refined_results": refined_results}
 
 
 class Evaluation(BaseModel):
@@ -297,12 +357,12 @@ class Evaluation(BaseModel):
 
 # tool_calling_evaluator_llm_chain = tool_calling_evaluator_prompt_template | llm.with_structured_output(SupervisorOverallState)
 
-async def tool_calling_result_evaluator(state: SupervisorOverallState) -> Dict: ##Literal["good", "bad"]:
+async def tool_calling_result_evaluator(state: SupervisorOverallState) -> SupervisorOverallState: ##Literal["good", "bad"]:
     print("tool_calling_result_evaluator executed")
     user_query = state['messages'][-1].content
     tool_call_results_list = state['tool_callings_result']
     tasks = state['tasks']
-    print(f"tasks: {tasks}")
+    # print(f"tasks: {tasks}")
     # tasks_list = tasks.get('tasks', [])
 
 
@@ -347,9 +407,9 @@ async def tool_calling_result_evaluator(state: SupervisorOverallState) -> Dict: 
         inputs_for_batch.append({
             "user_query": user_query,  # [상수] 모든 항목에 동일한 쿼리 삽입
             "task_description": tasks[i]['task_description'], # [변수]
-            "tool_calling_result": tool_call_results_list[i]['tool_calling_result']['messages'][-1].content # [변수]
+            "tool_calling_result": tool_call_results_list[i] # [변수]
         })
-        print(tool_call_results_list)
+        print(tool_call_results_list[i])
 
     evaluation_results = await tool_calling_evaluator_llm_chain.abatch(inputs_for_batch)
 
@@ -487,8 +547,8 @@ def result_concatnater(state: SupervisorOverallState) -> SupervisorOverallState:
 
 
 in_memory_store = InMemoryStore()
-thread_id = str(2)
-user_id = str(2)
+thread_id = str(2222333333)
+user_id = str(33333322222)
 
 # thread_id = str(uuid.uuid4())
 # user_id = str(uuid.uuid4())
@@ -556,16 +616,23 @@ master_graph = master_builder.compile(checkpointer=checkpointer, store=in_memory
 
 master_builder = StateGraph(SupervisorOverallState)
 master_builder.add_node("decomposer", task_decompose_node, retry_policy=RetryPolicy(), cache_policy=CachePolicy(ttl=120))
+master_builder.add_node("statement_refinery", statement_refinery, retry_policy=RetryPolicy(), cache_policy=CachePolicy(ttl=120))
 master_builder.add_node("parallel_router", parallel_task_routing_node, retry_policy=RetryPolicy(), cache_policy=CachePolicy(ttl=120))
 master_builder.add_node("tool_calling", tool_calling, retry_policy=RetryPolicy(), cache_policy=CachePolicy(ttl=120))
 master_builder.add_node("tool_calling_evaluator", tool_calling_result_evaluator, retry_policy=RetryPolicy(), cache_policy=CachePolicy(ttl=120))
-# master_builder.add_node("result_concatnater", result_concatnater, retry_policy=RetryPolicy(), cache_policy=CachePolicy(ttl=120))
+
 
 
 master_builder.add_edge(START, "decomposer")
-# master_builder.add_edge(START, "statement_refinery")
+master_builder.add_edge(START, "statement_refinery")
 master_builder.add_edge("decomposer", "parallel_router")
 master_builder.add_edge("parallel_router", "tool_calling")
+master_builder.add_edge("tool_calling", "tool_calling_evaluator")
+master_builder.add_edge("tool_calling_evaluator", END)
+master_builder.add_edge("statement_refinery", END)
+
+
+
 master_builder.add_edge("tool_calling", "tool_calling_evaluator")
 master_builder.add_edge("tool_calling_evaluator", END)
 # master_builder.add_edge("statement_refinery", "result_concatnater")
@@ -582,11 +649,22 @@ display(Image(master_graph.get_graph(xray=True).draw_mermaid_png()))
 from time import time
 start_time = time()
 result = await master_graph.ainvoke({"messages": [{"type": "human", "content": "What should I do to find a job in Germany?"}]}, config)
+# result = await master_graph.ainvoke({"messages": [{"type": "human", "content": "What is the best visa for work in Germany?"}]}, config)
 finishe_time = time()
 time_taken = finishe_time - start_time
 print(f"{time_taken} seconds") ##99.43021845817566 seconds
 
 
+result.keys()
+
+result['messages']
+result['tasks']
+result['refined_statement']
+result['routing_results']
+
+result['tasks'][-1]['task_description']
+result['tool_callings_result'][-1]
+result['tool_calling_eval']
 
 result.keys()
 result['messages']

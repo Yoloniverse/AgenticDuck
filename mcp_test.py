@@ -2,10 +2,12 @@ import json
 from typing import List, Dict, Any
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
-from langchain_core.pydantic_v1 import BaseModel, Field
+from pydantic.v1 import BaseModel, Field
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from pprint import pprint 
 from langchain_ollama import ChatOllama
+from langchain.agents import create_agent
+from langchain_core.messages import BaseMessage, HumanMessage
 # 1. mcp JSON 정보
 mcp_json_data = """
 {
@@ -85,7 +87,7 @@ for server_name, server_config in server_data.items():
     mcp_tools.append(new_tool)
 
 
-
+# dir(mcp_tools[1])
 
 
 """
@@ -94,12 +96,12 @@ https://langchain-ai.github.io/langgraph/agents/mcp/
 """
 
 # ## mcp tool들 명세서 json형식으로 load
-# with open("/home/sdt/Workspace/mvai/AgenticRAG/mcp_config.json", "r") as f:
-#     mcp_config_websearch = json.load(f)
+with open("/home/sdt/Workspace/mvai/AgenticRAG/mcp_config.json", "r") as f:
+    mcp_json_config = json.load(f)
 
-## mcp tool들 명세서 json형식으로 load
-with open("/home/sdt/Workspace/mvai/AgenticRAG/mcp_config_websearch.json", "r") as f:
-    mcp_config_websearch = json.load(f)
+# ## mcp tool들 명세서 json형식으로 load
+# with open("/home/sdt/Workspace/mvai/AgenticRAG/mcp_config_websearch.json", "r") as f:
+#     mcp_config_websearch = json.load(f)
 
 def create_server_config(mcp_json):
     config = mcp_json
@@ -124,39 +126,104 @@ def create_server_config(mcp_json):
     return server_config
 
 
-mcp_config_websearch = create_server_config(mcp_config_websearch)
-pprint(mcp_config_websearch)
-mcp_config_websearch.keys()
-
+mcp_config = create_server_config(mcp_json_config)
+pprint(mcp_config)
+mcp_config.keys()
+# mcp_git_config = mcp_config_websearch['git']
 ## mcp server들을 LangChain의 mcp client adapter로 연결
-websearch_client = MultiServerMCPClient(mcp_config_websearch)
+mcp_config_client = MultiServerMCPClient(mcp_config)
 
 ## 연결된 툴들 조회 
-websearch_tools = await websearch_client.get_tools()
+git_tools = await mcp_config_client.get_tools(server_name='git')
 
-pprint(websearch_tools)
+pprint(git_tools)
 
 llm = ChatOllama(model="qwen3:8b", base_url="http://127.0.0.1:11434")
 
 
 ## llm에 tool 등록 하면 됨 
-websearch_agent = create_react_agent(
+git_agent = create_agent(
     model=llm,
-    tools=websearch_tools,
-    prompt=(
-        "You are a websearch agent.\n\n"
-        "INSTRUCTIONS:\n"
-        "- Assist ONLY with web searching tasks\n"
-        "- After you're done with your tasks, respond to the supervisor directly\n"
-        "- Respond ONLY with the results of your work, do NOT include ANY other text."
-    ),
-    name="websearch_agent",
+    tools=git_tools,
+    system_prompt=("""
+            You are an expert of github operations. Execute needed github operations given the user requests.
+            """),
+    name="git_agent",
 )
+
+
+msg = """
+I want you to check what local branch I am at now now.
+"""
+
+git_agent.invoke({
+        "messages": [HumanMessage(content=msg)]
+    }
+)
+
+async for step in git_agent.astream(
+    {"messages": [HumanMessage(content=msg)]}
+):
+    # 에이전트가 어떤 단계를 실행 중인지 모두 출력
+    print(step)
+    print("--------------------")
+
+async for step in git_agent.astream(
+    {"messages": [HumanMessage(content=msg)]}
+):
+# event 딕셔너리의 'event' 키로 이벤트 타입 확인
+    if step["event"] == "on_chat_model_stream":
+        # 'data' 키 아래 'chunk'에 토큰이 들어 있음
+        chunk = step["data"]["chunk"]
+        if chunk.content:
+            # chunk.content가 실제 텍스트 토큰
+            print(chunk.content, end="", flush=True)
+
+
+
+## llm에 tool 등록 하면 됨 
+aagent = create_agent(
+    model=llm,
+    system_prompt=("""
+            You are a robot
+            """),
+    name="agent",
+)
+
+async for event in aagent.astream({"messages": [HumanMessage(content="Hello world")]}):
+        
+        # [디버깅] 어떤 이벤트가 발생하는지 확인합니다.
+        # 'event' 키가 있는 이벤트만 필터링해서 이름과 노드 이름을 출력합니다.
+        if "event" in event:
+            event_name = event["event"]
+            event_node = event.get("name") # 이벤트가 발생한 노드 이름
+            print(f"\n--- [DEBUG] Event: {event_name}, Node: {event_node} ---")
+
+        # [핵심] 'on_chat_model_stream' 이벤트가 발생하면 토큰을 출력합니다.
+        # 이 이벤트는 'llm_node' (call_model 함수) 내부에서 발생합니다.
+        if event["event"] == "on_chat_model_stream":
+            chunk = event["data"]["chunk"]
+            if chunk.content:
+                # chunk.content가 실제 텍스트 토큰입니다.
+                print(chunk.content, end="", flush=True)
+
+
+async for event in aagent.astream({"messages": [HumanMessage(content="Hello world")]}):
+  print(type(event))
+  print(event.keys())
+  print(event)
+
+
+  if event['event'] == "on_chat_model_stream":
+    chunk = step["data"]["chunk"]
+    if chunk.content:
+        # chunk.content가 실제 텍스트 토큰
+        print(chunk.content, end="", flush=True)
 
 
 
 """
-2. 남이 만든 MCP 서버들을 json으로 정보를 가져와서 MCP 서버의 호출 로직을 직접 구현하고, 이를 @tool 데코레이터로 감싸는 방식로 등록하는 방법
+2. 남이 만든 MCP 서버들을 json으로 정보를 가져와서 MCP 서버의 호출 로직을 직접 구현하고, 이를 @tool 데코레이터로 감싸는 방식로 등록하는 방법
 """
 
 
@@ -398,3 +465,7 @@ async def main():
 if __name__ == "__main__":
     import asyncio
     asyncio.run(main())
+
+
+
+

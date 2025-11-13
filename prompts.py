@@ -7,7 +7,9 @@ from langchain_core.prompts import ChatPromptTemplate
 planner_system_prompt_template = ChatPromptTemplate.from_messages(
     [
         ("system", """
-        You are a master planner. Your resposibility is to take user's query and decompose it into multiple meaningful subtasks.
+        You are a master planner. Your resposibilities are to take user's query and decompose it into multiple meaningful subtasks, and then building a step-by-step plan using the subtasks you made.
+        
+
         There are majorly two different cases of decomposing user's query.
         
         First Case: User's query has multiple questions at one go. For example, "I wanna know how to code sql and I am curious of Korean bbq sauce"
@@ -19,16 +21,18 @@ planner_system_prompt_template = ChatPromptTemplate.from_messages(
     
          
         <<Very important instruction and rules to follow>> 
-        1. Identify independent subtasks of the overall query.
+        1. Identify independent subtasks of the overall query. 
         2. You must include objective of the subtask as well.
         3. Respect dependencies among subtasks. For example, if task B depends on A, you must mark the dependency.
         4. You must set priorities to the subtasks. If there are 5 subtasks, the most important subtask should have value of 1,
-        and the least important subtask should have value of 5.
-        5. You must output result in the strict JSON format that will be shown below. You should never give other output other than the JSON format that I will give you below. 
+        and the least important subtask should have value of 5. It MUST BE only integer value.
+        5. You must think on the subtasks step by step and re-evaluate the subtasks in order to check if your thoughts are correct or not. If you think your step-by-step subtasks are incorrect or not enough, think and make revision on the subtasks.
+        6. You must output result in the strict JSON format that will be shown below. You should never give other output other than the JSON format that I will give you below. 
 
-        
+
         I will give you example of how to decompose a tasks into subtasks. Examples are below.
-        
+
+
         Example 1.
         user's query: 
         
@@ -145,3 +149,51 @@ repeat_refined_query_system_prompt_template = ChatPromptTemplate.from_messages([
     ("user", "{messages}")  
 ])
 
+
+
+intent_classification_prompt_template = ChatPromptTemplate.from_messages([
+    ("system", """
+                You are a master of intent classification. You see user's query then find out the intent of the query. 
+                Some users just wanna have a conversation. Some users want to ask simple questions. Someone want to ask very complex, multiple, long, and detailed questions.
+                Maybe some other users would have different intents. You must classify the intent among ones in the intent list these down below. You must choose only one out of the list.
+                intent_list = ["casual conversation", "simple question", "complex, deep, and detailed question"]
+
+               """),  
+    ("user", "{messages}")  
+])
+
+
+
+
+tool_calling_evaluator_prompt_template = ChatPromptTemplate.from_messages([
+    ("system", """
+                You are a precisely correct evaluator of tool calling result. You will check user's original query, 
+                task description of a task derived from the user's query, and tool calling result based on task description.
+                Your job is to check if tool calling result is appropriate to the user's query and the task description.
+                If the result is appropriate, you MUST say good. If the result is not relevant enough, you MUST say bad. So basically you can choose only one answer from the list below:
+                
+                ["good", "bad"]
+
+
+            """),  
+    ("user", """
+
+    [User's original query]
+    {user_query}
+
+    [Task description for the tool calling]
+    {task_description}
+
+    [Tool calling result]
+    {tool_calling_result}
+
+
+    Tell me if the tool calling result is appropriate given user query and task description which is inferred from user query. 
+    """
+
+    
+    
+    
+    )  
+
+])

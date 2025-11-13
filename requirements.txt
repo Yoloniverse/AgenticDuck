@@ -15,3 +15,5 @@ langgraph-checkpoint-postgres ##for checkpointer with postgres
 langgraph-checkpoint-sqlite
 langgraph-supervisor
 pycryptodome
+langchain-mcp-adapters
+mcp-server-git
